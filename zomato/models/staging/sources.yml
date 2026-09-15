@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: zomato_raw
+    database: zomato-ai-data-engineering
+    schema: raw
+
+    tables:
+      - name: food
+      - name: menu
+      - name: order_items
+      - name: orders
+      - name: restaurant
+      - name: restaurants
+      - name: reviews
+      - name: users
