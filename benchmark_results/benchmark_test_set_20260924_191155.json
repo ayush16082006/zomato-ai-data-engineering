@@ -1,0 +1,502 @@
+[
+  {
+    "review_id": "1",
+    "rating": 4,
+    "comment": "Great eco-friendly packaging. Delivered right on time."
+  },
+  {
+    "review_id": "10",
+    "rating": 4,
+    "comment": "The food was absolutely delicious."
+  },
+  {
+    "review_id": "100",
+    "rating": 5,
+    "comment": "Totally worth every rupee. Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "1000",
+    "rating": 5,
+    "comment": "Totally worth every rupee."
+  },
+  {
+    "review_id": "10000",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100000",
+    "rating": 5,
+    "comment": "Fresh, hot and full of flavor."
+  },
+  {
+    "review_id": "100001",
+    "rating": 3,
+    "comment": "Fine, would maybe order again."
+  },
+  {
+    "review_id": "100002",
+    "rating": 4,
+    "comment": "Arrived earlier than expected."
+  },
+  {
+    "review_id": "100003",
+    "rating": 2,
+    "comment": "Oily, stale and tasteless."
+  },
+  {
+    "review_id": "100004",
+    "rating": 2,
+    "comment": "Gravy spilled all over the bag. Quality has really dropped lately."
+  },
+  {
+    "review_id": "100005",
+    "rating": 4,
+    "comment": "Super fast delivery. Totally worth every rupee."
+  },
+  {
+    "review_id": "100006",
+    "rating": 5,
+    "comment": "Neatly packed with no spills."
+  },
+  {
+    "review_id": "100007",
+    "rating": 1,
+    "comment": "Far too expensive for what you get."
+  },
+  {
+    "review_id": "100008",
+    "rating": 1,
+    "comment": "The delivery partner was rude. Overpriced and not worth it."
+  },
+  {
+    "review_id": "100009",
+    "rating": 5,
+    "comment": "Arrived earlier than expected."
+  },
+  {
+    "review_id": "10001",
+    "rating": 4,
+    "comment": "Great eco-friendly packaging. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100010",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100011",
+    "rating": 4,
+    "comment": "Neatly packed with no spills. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100012",
+    "rating": 5,
+    "comment": "Authentic taste, cooked perfectly. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100013",
+    "rating": 4,
+    "comment": "One of the best meals i've ordered. Great value for the price."
+  },
+  {
+    "review_id": "100014",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100015",
+    "rating": 3,
+    "comment": "An average experience overall."
+  },
+  {
+    "review_id": "100016",
+    "rating": 5,
+    "comment": "Great value for the price."
+  },
+  {
+    "review_id": "100017",
+    "rating": 1,
+    "comment": "Delivery took over an hour."
+  },
+  {
+    "review_id": "100018",
+    "rating": 5,
+    "comment": "Neatly packed with no spills. Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100019",
+    "rating": 5,
+    "comment": "Super fast delivery. Great value for the price."
+  },
+  {
+    "review_id": "10002",
+    "rating": 1,
+    "comment": "Far too expensive for what you get. Arrived way too late."
+  },
+  {
+    "review_id": "100020",
+    "rating": 2,
+    "comment": "Far too expensive for what you get. The delivery partner was rude."
+  },
+  {
+    "review_id": "100021",
+    "rating": 5,
+    "comment": "Delivered right on time."
+  },
+  {
+    "review_id": "100022",
+    "rating": 5,
+    "comment": "One of the best meals i've ordered. Super fast delivery."
+  },
+  {
+    "review_id": "100023",
+    "rating": 4,
+    "comment": "Smooth, hassle-free experience. Neatly packed with no spills."
+  },
+  {
+    "review_id": "100024",
+    "rating": 4,
+    "comment": "The food was absolutely delicious."
+  },
+  {
+    "review_id": "100025",
+    "rating": 4,
+    "comment": "Great eco-friendly packaging."
+  },
+  {
+    "review_id": "100026",
+    "rating": 4,
+    "comment": "Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100027",
+    "rating": 3,
+    "comment": "Decent but could be better."
+  },
+  {
+    "review_id": "100028",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100029",
+    "rating": 5,
+    "comment": "Fresh, hot and full of flavor. Delivered right on time."
+  },
+  {
+    "review_id": "10003",
+    "rating": 2,
+    "comment": "Gravy spilled all over the bag."
+  },
+  {
+    "review_id": "100030",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience. One of the best meals i've ordered."
+  },
+  {
+    "review_id": "100031",
+    "rating": 1,
+    "comment": "Gravy spilled all over the bag. Delivery took over an hour."
+  },
+  {
+    "review_id": "100032",
+    "rating": 5,
+    "comment": "The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100033",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100034",
+    "rating": 4,
+    "comment": "Great value for the price."
+  },
+  {
+    "review_id": "100035",
+    "rating": 2,
+    "comment": "The packaging leaked everywhere. Oily, stale and tasteless."
+  },
+  {
+    "review_id": "100036",
+    "rating": 4,
+    "comment": "Smooth, hassle-free experience. Totally worth every rupee."
+  },
+  {
+    "review_id": "100037",
+    "rating": 5,
+    "comment": "Delivered right on time. One of the best meals i've ordered."
+  },
+  {
+    "review_id": "100038",
+    "rating": 3,
+    "comment": "An average experience overall."
+  },
+  {
+    "review_id": "100039",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "10004",
+    "rating": 4,
+    "comment": "Neatly packed with no spills. Totally worth every rupee."
+  },
+  {
+    "review_id": "100040",
+    "rating": 1,
+    "comment": "Delivery took over an hour."
+  },
+  {
+    "review_id": "100041",
+    "rating": 5,
+    "comment": "Totally worth every rupee."
+  },
+  {
+    "review_id": "100042",
+    "rating": 5,
+    "comment": "One of the best meals i've ordered."
+  },
+  {
+    "review_id": "100043",
+    "rating": 5,
+    "comment": "Great eco-friendly packaging. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100044",
+    "rating": 4,
+    "comment": "Arrived earlier than expected. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100045",
+    "rating": 5,
+    "comment": "Arrived earlier than expected. Great eco-friendly packaging."
+  },
+  {
+    "review_id": "100046",
+    "rating": 4,
+    "comment": "Smooth, hassle-free experience. Super fast delivery."
+  },
+  {
+    "review_id": "100047",
+    "rating": 5,
+    "comment": "The delivery partner was polite and helpful. Neatly packed with no spills."
+  },
+  {
+    "review_id": "100048",
+    "rating": 5,
+    "comment": "Neatly packed with no spills."
+  },
+  {
+    "review_id": "100049",
+    "rating": 4,
+    "comment": "One of the best meals i've ordered. Great eco-friendly packaging."
+  },
+  {
+    "review_id": "10005",
+    "rating": 5,
+    "comment": "The food was absolutely delicious."
+  },
+  {
+    "review_id": "100050",
+    "rating": 5,
+    "comment": "Totally worth every rupee."
+  },
+  {
+    "review_id": "100051",
+    "rating": 4,
+    "comment": "Totally worth every rupee. Great eco-friendly packaging."
+  },
+  {
+    "review_id": "100052",
+    "rating": 5,
+    "comment": "Delivered right on time."
+  },
+  {
+    "review_id": "100053",
+    "rating": 4,
+    "comment": "Super fast delivery."
+  },
+  {
+    "review_id": "100054",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100055",
+    "rating": 4,
+    "comment": "Neatly packed with no spills."
+  },
+  {
+    "review_id": "100056",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100057",
+    "rating": 4,
+    "comment": "Super fast delivery."
+  },
+  {
+    "review_id": "100058",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100059",
+    "rating": 2,
+    "comment": "Gravy spilled all over the bag."
+  },
+  {
+    "review_id": "10006",
+    "rating": 5,
+    "comment": "The delivery partner was polite and helpful. Fresh, hot and full of flavor."
+  },
+  {
+    "review_id": "100060",
+    "rating": 5,
+    "comment": "Totally worth every rupee."
+  },
+  {
+    "review_id": "100061",
+    "rating": 2,
+    "comment": "The packaging leaked everywhere."
+  },
+  {
+    "review_id": "100062",
+    "rating": 5,
+    "comment": "Great value for the price. Authentic taste, cooked perfectly."
+  },
+  {
+    "review_id": "100063",
+    "rating": 5,
+    "comment": "Great value for the price."
+  },
+  {
+    "review_id": "100064",
+    "rating": 2,
+    "comment": "Gravy spilled all over the bag. Overpriced and not worth it."
+  },
+  {
+    "review_id": "100065",
+    "rating": 3,
+    "comment": "Decent but could be better."
+  },
+  {
+    "review_id": "100066",
+    "rating": 5,
+    "comment": "Great value for the price."
+  },
+  {
+    "review_id": "100067",
+    "rating": 5,
+    "comment": "Totally worth every rupee. The food was absolutely delicious."
+  },
+  {
+    "review_id": "100068",
+    "rating": 4,
+    "comment": "Arrived earlier than expected. Great value for the price."
+  },
+  {
+    "review_id": "100069",
+    "rating": 2,
+    "comment": "The delivery partner was rude."
+  },
+  {
+    "review_id": "10007",
+    "rating": 5,
+    "comment": "Authentic taste, cooked perfectly."
+  },
+  {
+    "review_id": "100070",
+    "rating": 4,
+    "comment": "Delivered right on time."
+  },
+  {
+    "review_id": "100071",
+    "rating": 1,
+    "comment": "The packaging leaked everywhere."
+  },
+  {
+    "review_id": "100072",
+    "rating": 3,
+    "comment": "An average experience overall."
+  },
+  {
+    "review_id": "100073",
+    "rating": 4,
+    "comment": "One of the best meals i've ordered."
+  },
+  {
+    "review_id": "100074",
+    "rating": 5,
+    "comment": "Authentic taste, cooked perfectly."
+  },
+  {
+    "review_id": "100075",
+    "rating": 5,
+    "comment": "Arrived earlier than expected."
+  },
+  {
+    "review_id": "100076",
+    "rating": 5,
+    "comment": "Arrived earlier than expected. Totally worth every rupee."
+  },
+  {
+    "review_id": "100077",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  },
+  {
+    "review_id": "100078",
+    "rating": 4,
+    "comment": "Great value for the price."
+  },
+  {
+    "review_id": "100079",
+    "rating": 5,
+    "comment": "Smooth, hassle-free experience. Authentic taste, cooked perfectly."
+  },
+  {
+    "review_id": "10008",
+    "rating": 5,
+    "comment": "One of the best meals i've ordered. Smooth, hassle-free experience."
+  },
+  {
+    "review_id": "100080",
+    "rating": 4,
+    "comment": "Smooth, hassle-free experience. Arrived earlier than expected."
+  },
+  {
+    "review_id": "100081",
+    "rating": 4,
+    "comment": "Authentic taste, cooked perfectly. The delivery partner was polite and helpful."
+  },
+  {
+    "review_id": "100082",
+    "rating": 2,
+    "comment": "The food was cold and bland. The rider got lost twice."
+  },
+  {
+    "review_id": "100083",
+    "rating": 2,
+    "comment": "The packaging leaked everywhere."
+  },
+  {
+    "review_id": "100084",
+    "rating": 1,
+    "comment": "The food was cold and bland. Gravy spilled all over the bag."
+  },
+  {
+    "review_id": "100085",
+    "rating": 3,
+    "comment": "Decent but could be better."
+  },
+  {
+    "review_id": "100086",
+    "rating": 3,
+    "comment": "It was okay, nothing special."
+  }
+]

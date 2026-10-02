@@ -3,3 +3,8 @@ google-cloud-bigquery
 pyarrow
 dbt-bigquery
 numpy
+openai
+streamlit
+requests
+scikit-learn
+ollama

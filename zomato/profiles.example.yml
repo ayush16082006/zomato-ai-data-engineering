@@ -1,0 +1,18 @@
+zomato:
+  target: dev
+
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+
+      project: YOUR_GCP_PROJECT_ID
+      dataset: raw
+
+      keyfile: /opt/airflow/credentials/service-account.json
+
+      location: asia-south1
+
+      threads: 6
+
+      priority: interactive

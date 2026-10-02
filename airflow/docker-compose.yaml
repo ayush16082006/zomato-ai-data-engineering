@@ -1,0 +1,260 @@
+# ============================================================
+# ZOMATO AIRFLOW - BIGQUERY VERSION
+# ============================================================
+#
+# Airflow 3.x
+# LocalExecutor
+# PostgreSQL metadata database
+# BigQuery + dbt-bigquery
+# OmniRoute review enrichment
+#
+# ============================================================
+
+
+x-airflow-common: &airflow-common
+
+  build: .
+
+  environment: &airflow-env
+
+    # --------------------------------------------------------
+    # AIRFLOW EXECUTOR
+    # --------------------------------------------------------
+
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    # --------------------------------------------------------
+    # AIRFLOW METADATA DATABASE
+    # --------------------------------------------------------
+
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: >-
+      postgresql+psycopg2://airflow:airflow@postgres/airflow
+
+    # --------------------------------------------------------
+    # AIRFLOW BASIC SETTINGS
+    # --------------------------------------------------------
+
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+
+    AIRFLOW__CORE__AUTH_MANAGER: >-
+      airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+
+    AIRFLOW__CORE__FERNET_KEY: ""
+
+    # --------------------------------------------------------
+    # AIRFLOW 3 API AUTHENTICATION
+    # --------------------------------------------------------
+
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+
+    # IMPORTANT:
+    # Airflow tasks communicate with the API server
+    # using the Docker service name.
+    #
+
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: >-
+      http://apiserver:8080/execution/
+
+
+    # ========================================================
+    # GOOGLE CLOUD / BIGQUERY
+    # ========================================================
+
+    GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-zomato-ai-data-engineering}
+
+    # Service-account JSON file inside the container.
+    #
+    # The file will be mounted from:
+    #
+    # ./credentials/service-account.json
+    #
+    # on the host.
+    #
+
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/credentials/service-account.json
+
+
+    # ========================================================
+    # OMNIROUTE
+    # ========================================================
+
+    omNIROUTE_API_KEY: ${OMNIROUTE_API_KEY}
+    OMNIROUTE_URL: ${OMNIROUTE_URL}
+
+
+  # ========================================================
+  # VOLUMES
+  # ========================================================
+
+  volumes:
+
+    # Airflow DAGs
+    - ./dags:/opt/airflow/dags
+
+    # Airflow logs
+    - ./logs:/opt/airflow/logs
+
+    # Your dbt project
+    - ../zomato:/opt/airflow/dbt/zomato
+
+    # Your AI scripts
+    - ../ai:/opt/airflow/ai
+
+    # Google Cloud service-account credentials
+    - ./credentials:/opt/airflow/credentials:ro
+
+
+  # ========================================================
+  # POSTGRES DEPENDENCY
+  # ========================================================
+
+  depends_on:
+
+    postgres:
+      condition: service_healthy
+
+
+# ============================================================
+# SERVICES
+# ============================================================
+
+services:
+
+
+  # ==========================================================
+  # POSTGRES
+  # ==========================================================
+
+  postgres:
+
+    image: postgres:15
+
+    environment:
+
+      POSTGRES_USER: airflow
+
+      POSTGRES_PASSWORD: airflow
+
+      POSTGRES_DB: airflow
+
+    volumes:
+
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-U",
+          "airflow"
+        ]
+
+      interval: 5s
+
+      timeout: 5s
+
+      retries: 5
+
+
+  # ==========================================================
+  # AIRFLOW INITIALIZATION
+  # ==========================================================
+
+  airflow-init:
+
+    <<: *airflow-common
+
+    entrypoint: /bin/bash
+
+    command:
+
+      - -c
+
+      - |
+        airflow db migrate
+
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname a \
+          --lastname b \
+          --role Admin \
+          --email admin@example.com || true
+
+    depends_on:
+
+      postgres:
+
+        condition: service_healthy
+
+
+  # ==========================================================
+  # AIRFLOW API SERVER
+  # ==========================================================
+
+  apiserver:
+
+    <<: *airflow-common
+
+    command: api-server
+
+    ports:
+
+      - "8081:8080"
+
+    restart: always
+
+    depends_on:
+
+      airflow-init:
+
+        condition: service_completed_successfully
+
+
+  # ==========================================================
+  # AIRFLOW SCHEDULER
+  # ==========================================================
+
+  scheduler:
+
+    <<: *airflow-common
+
+    command: scheduler
+
+    restart: always
+
+    depends_on:
+
+      airflow-init:
+
+        condition: service_completed_successfully
+
+
+  # ==========================================================
+  # AIRFLOW DAG PROCESSOR
+  # ==========================================================
+
+  dag-processor:
+
+    <<: *airflow-common
+
+    command: dag-processor
+
+    restart: always
+
+    depends_on:
+
+      airflow-init:
+
+        condition: service_completed_successfully
+
+
+# ============================================================
+# PERSISTENT VOLUMES
+# ============================================================
+
+volumes:
+
+  pgdata:

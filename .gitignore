@@ -93,6 +93,9 @@ airflow/airflow.cfg
 # Airflow local state
 airflow/__pycache__/
 
+# Airflow local credentials
+airflow/credentials/
+
 
 # =========================================================
 # 7. LOCAL DATASETS
@@ -193,6 +196,9 @@ tempCodeRunnerFile.py
 tmp/
 temp/
 
+# Generated local model test results
+model_test_results.csv
+
 
 # =========================================================
 # 16. ZIP / ARCHIVE FILES
@@ -211,3 +217,52 @@ temp/
 # Some legitimate JSON configuration files may belong
 # in GitHub. Only credential-related JSON files are ignored.
 # =========================================================
+
+
+# =========================================================
+# 17. ZOMATO AI / LOCAL PROJECT CONFIGURATION
+# =========================================================
+
+# dbt local user configuration
+zomato/.user.yml
+
+# Local dbt credentials/configuration
+zomato/profiles.yml
+
+
+# =========================================================
+# 18. ZOMATO AI GENERATED RAG ARTIFACTS
+# =========================================================
+
+ai/rag_index/
+ai/review_embeddings/
+ai/__pycache__/
+
+
+# =========================================================
+# 19. GENERATED MODEL CATALOGUES / TEST OUTPUTS
+# =========================================================
+
+models.json
+models_live.json
+test_review_enrichment_output.json
+
+
+# =========================================================
+# 20. TEMPORARY AI EXPERIMENTS
+# =========================================================
+
+# Temporary OmniRoute model testing
+test_omniroute_models.py
+
+
+# =========================================================
+# 21. LOCAL BACKUP COPIES
+# =========================================================
+
+ai/rag_chat_backup.py
+ai/text_to_sql_backup.py
+
+
+
+zomato/.user.yml

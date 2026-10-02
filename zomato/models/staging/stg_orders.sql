@@ -1,6 +1,6 @@
 select
     order_id,
-    order_timestamp,
+    safe_cast(order_timestamp as timestamp) as order_timestamp,
     order_date,
     user_id as customer_id,
     safe_cast(r_id as int64) as restaurant_id,
