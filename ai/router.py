@@ -30,6 +30,7 @@ import re
 from typing import Any, Dict
 
 import requests
+import os
 
 
 # ============================================================
@@ -51,7 +52,10 @@ VALID_ROUTES = {
 # OLLAMA CONFIGURATION
 # ============================================================
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+)
 
 # Existing Ollama model used by the project.
 ROUTER_MODEL = "gpt-oss:120b-cloud"

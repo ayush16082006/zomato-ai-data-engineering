@@ -25,13 +25,35 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
 
-import ollama
+load_dotenv()
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+OLLAMA_BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434/v1",
+).rstrip("/")
+
+OLLAMA_API_KEY = os.getenv(
+    "OLLAMA_API_KEY",
+    "ollama",
+)
+
+OLLAMA_CLIENT = OpenAI(
+    base_url=OLLAMA_BASE_URL,
+    api_key=OLLAMA_API_KEY,
+)
 
 LLM_MODEL = "gpt-oss:120b-cloud"
 
@@ -234,7 +256,7 @@ The value of confidence must be between 0 and 1.
 
     try:
 
-        response = ollama.chat(
+        response = OLLAMA_CLIENT.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {
@@ -242,12 +264,10 @@ The value of confidence must be between 0 and 1.
                     "content": prompt,
                 }
             ],
-            options={
-                "temperature": 0,
-            },
-        )
+            temperature=0,
+            )
 
-        content = response["message"]["content"].strip()
+        content = response.choices[0].message.content.strip()
 
         # ----------------------------------------------------
         # Remove accidental markdown fences.

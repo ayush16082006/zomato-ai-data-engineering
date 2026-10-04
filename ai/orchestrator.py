@@ -60,13 +60,17 @@ from rag_engine import answer_review_question
 
 # Domain Guard
 from domain_guard import check_domain
+import os
 
 
 # ============================================================
 # OLLAMA CONFIGURATION
 # ============================================================
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+)
 
 # Model used for:
 #

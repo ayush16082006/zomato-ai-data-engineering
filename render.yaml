@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: zomato-ai
+    runtime: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: streamlit run ai/app.py --server.address 0.0.0.0 --server.port $PORT
+
+    healthCheckPath: /
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.16
+
+      - key: GOOGLE_CLOUD_PROJECT
+        sync: false
+
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/zomato-service-account.json
+
+      - key: OMNIROUTE_URL
+        sync: false
+
+      - key: OMNIROUTE_API_KEY
+        sync: false
+
+      - key: OLLAMA_BASE_URL
+        value: https://ollama.com/v1
+
+      - key: OLLAMA_API_KEY
+        sync: false
