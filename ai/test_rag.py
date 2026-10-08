@@ -1,139 +1,410 @@
+"""
+ZOMATO AI - COMPLETE RAG TEST SUITE
+===================================
+
+Purpose
+-------
+Production-oriented test suite for the NEW Qdrant-based RAG engine.
+
+This test file is designed for the current architecture:
+
+    User Question
+          |
+          v
+    Qdrant Cloud Inference
+          |
+          v
+    Qdrant Vector Search
+          |
+          v
+    Progressive Retrieval
+          |
+          v
+    Duplicate / Diversity Filtering
+          |
+          v
+    BigQuery Evidence Retrieval
+          |
+          v
+    Evidence-Aware LLM
+          |
+          v
+    Final Answer
+
+
+IMPORTANT
+---------
+This test file does NOT:
+
+- load the old 300k embedding matrix
+- load ai/rag_index/embeddings.npy
+- load ai/rag_index/reviews.parquet
+- call the old local embedding architecture
+- call MMR
+- call initialize_rag_engine()
+- call check_ollama()
+
+It uses only the current public RAG API:
+
+    rag_engine.answer_review_question(question)
+
+The purpose is to test the complete RAG pipeline end-to-end.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any, Dict, List
+
+import pandas as pd
+
 import rag_engine
 
 
-# ============================================================
+# ============================================================================
 # CONFIGURATION
-# ============================================================
+# ============================================================================
 
-TOP_K = 5
+# This is the target number of reviews the RAG engine attempts to provide.
+# It is NOT treated as a hard requirement because duplicate-heavy evidence
+# may legitimately result in fewer distinct reviews.
+EXPECTED_TOP_K = 5
 
 
-# ============================================================
-# 9 INDIVIDUAL QUESTIONS
-# ============================================================
+# ============================================================================
+# TEST QUESTIONS
+# ============================================================================
 
-INDIVIDUAL_QUESTIONS = [
+"""
+The questions are intentionally varied.
+
+They test:
+
+1. Food quality
+2. Delivery
+3. Service
+4. Pricing
+5. Packaging
+6. Positive experiences
+7. Negative experiences
+8. Complaints
+9. High ratings
+10. Low ratings
+11. Overall experience
+12. Cross-topic questions
+13. Quality + delivery
+14. Service + food
+15. Price + quality
+16. Delivery problems
+17. Customer satisfaction
+18. General review patterns
+19. Evidence limitation
+20. Broad customer opinion
+21. Food taste
+22. Delivery partner
+23. Value for money
+24. Common issues
+25. Complete experience
+"""
+
+
+TEST_QUESTIONS: List[Dict[str, Any]] = [
+
+    # ========================================================================
+    # 1. FOOD QUALITY
+    # ========================================================================
 
     {
         "number": 1,
         "category": "Food Quality",
-        "question":
+        "question": (
             "What do customers say about food quality?"
+        ),
     },
 
     {
         "number": 2,
-        "category": "Delivery",
-        "question":
-            "What do customers say about delivery experience?"
+        "category": "Food Taste",
+        "question": (
+            "What do customers say about the taste of the food?"
+        ),
     },
 
     {
         "number": 3,
-        "category": "Negative Experience",
-        "question":
-            "What are the main complaints from customers?"
+        "category": "Food Freshness",
+        "question": (
+            "Do customers mention anything about food freshness?"
+        ),
     },
+
+    # ========================================================================
+    # 2. DELIVERY
+    # ========================================================================
 
     {
         "number": 4,
-        "category": "Restaurant Service",
-        "question":
-            "What do customers say about restaurant service?"
+        "category": "Delivery Experience",
+        "question": (
+            "What do customers say about the delivery experience?"
+        ),
     },
 
     {
         "number": 5,
-        "category": "Pricing",
-        "question":
-            "What do customers say about food prices and value for money?"
+        "category": "Late Delivery",
+        "question": (
+            "What complaints do customers have about late delivery?"
+        ),
     },
 
     {
         "number": 6,
-        "category": "Packaging",
-        "question":
-            "What do customers say about food packaging?"
+        "category": "Delivery Partner",
+        "question": (
+            "What do customers say about delivery partners?"
+        ),
     },
+
+    # ========================================================================
+    # 3. SERVICE
+    # ========================================================================
 
     {
         "number": 7,
-        "category": "Late Delivery",
-        "question":
-            "What complaints do customers have about late delivery?"
+        "category": "Restaurant Service",
+        "question": (
+            "What do customers say about restaurant service?"
+        ),
     },
 
     {
         "number": 8,
-        "category": "Positive Experience",
-        "question":
-            "What do customers like most about their Zomato orders?"
+        "category": "Staff Experience",
+        "question": (
+            "What do customers say about staff behavior and service?"
+        ),
     },
+
+    # ========================================================================
+    # 4. PRICE / VALUE
+    # ========================================================================
 
     {
         "number": 9,
+        "category": "Pricing",
+        "question": (
+            "What do customers say about food prices and value for money?"
+        ),
+    },
+
+    {
+        "number": 10,
+        "category": "Value for Money",
+        "question": (
+            "Do customers feel they receive good value for the money?"
+        ),
+    },
+
+    # ========================================================================
+    # 5. PACKAGING
+    # ========================================================================
+
+    {
+        "number": 11,
+        "category": "Packaging",
+        "question": (
+            "What do customers say about food packaging?"
+        ),
+    },
+
+    # ========================================================================
+    # 6. POSITIVE EXPERIENCE
+    # ========================================================================
+
+    {
+        "number": 12,
+        "category": "Positive Experience",
+        "question": (
+            "What do customers like most about their Zomato orders?"
+        ),
+    },
+
+    {
+        "number": 13,
+        "category": "Positive Feedback",
+        "question": (
+            "What are the main positive points mentioned by customers?"
+        ),
+    },
+
+    # ========================================================================
+    # 7. NEGATIVE EXPERIENCE
+    # ========================================================================
+
+    {
+        "number": 14,
+        "category": "Negative Experience",
+        "question": (
+            "What are the main complaints from customers?"
+        ),
+    },
+
+    {
+        "number": 15,
+        "category": "Negative Feedback",
+        "question": (
+            "What are the main negative experiences mentioned in reviews?"
+        ),
+    },
+
+    {
+        "number": 16,
+        "category": "Customer Problems",
+        "question": (
+            "What problems do customers commonly mention in their reviews?"
+        ),
+    },
+
+    # ========================================================================
+    # 8. RATINGS
+    # ========================================================================
+
+    {
+        "number": 17,
         "category": "High Ratings",
-        "question":
+        "question": (
             "What do customers with high ratings say about their experience?"
-    }
-]
-
-
-# ============================================================
-# 5 GROUPED / BROADER QUESTIONS
-# ============================================================
-
-GROUPED_QUESTIONS = [
-
-    {
-        "number": 1,
-        "category": "Overall Experience",
-        "question":
-            "What are the main things customers like and dislike about their Zomato orders?"
+        ),
     },
 
     {
-        "number": 2,
+        "number": 18,
+        "category": "Low Ratings",
+        "question": (
+            "What do customers with low ratings complain about?"
+        ),
+    },
+
+    # ========================================================================
+    # 9. COMBINED QUESTIONS
+    # ========================================================================
+
+    {
+        "number": 19,
         "category": "Food + Delivery",
-        "question":
+        "question": (
             "How do customers describe both food quality and delivery experience?"
+        ),
     },
 
     {
-        "number": 3,
-        "category": "Problems",
-        "question":
+        "number": 20,
+        "category": "Food + Service",
+        "question": (
+            "How do customers describe food quality and restaurant service?"
+        ),
+    },
+
+    {
+        "number": 21,
+        "category": "Price + Quality",
+        "question": (
+            "How do customers describe the relationship between food quality and price?"
+        ),
+    },
+
+    {
+        "number": 22,
+        "category": "Delivery + Service",
+        "question": (
+            "What do customers say about delivery and service together?"
+        ),
+    },
+
+    # ========================================================================
+    # 10. BROADER QUESTIONS
+    # ========================================================================
+
+    {
+        "number": 23,
+        "category": "Overall Experience",
+        "question": (
+            "What are the main things customers like and dislike about their Zomato orders?"
+        ),
+    },
+
+    {
+        "number": 24,
+        "category": "Overall Problems",
+        "question": (
             "What are the most common problems mentioned in customer reviews?"
+        ),
     },
 
     {
-        "number": 4,
-        "category": "Value",
-        "question":
-            "How do customers describe the value of the food, including price, quality, and quantity?"
-    },
-
-    {
-        "number": 5,
+        "number": 25,
         "category": "Complete Experience",
-        "question":
+        "question": (
             "What patterns can be seen across food quality, delivery, service, pricing, and packaging?"
-    }
+        ),
+    },
 ]
 
 
-# ============================================================
-# PRINT RETRIEVED REVIEWS
-# ============================================================
+# ============================================================================
+# PRINT HELPERS
+# ============================================================================
 
-def print_retrieved_reviews(
-    top_reviews
-):
+def print_separator(
+    character: str = "=",
+    width: int = 90,
+) -> None:
+    """Print a consistent terminal separator."""
+
+    print(character * width)
+
+
+def print_header(
+    title: str,
+) -> None:
+    """Print a large section header."""
 
     print()
-    print("-" * 80)
-    print("TOP RETRIEVED REVIEWS")
-    print("-" * 80)
+    print_separator()
+    print(title)
+    print_separator()
+
+
+# ============================================================================
+# PRINT RETRIEVED REVIEWS
+# ============================================================================
+
+def print_retrieved_reviews(
+    top_reviews: pd.DataFrame,
+) -> None:
+    """
+    Print reviews returned by the current RAG engine.
+
+    The number of retrieved reviews is informational.
+
+    Fewer than EXPECTED_TOP_K reviews is NOT automatically treated
+    as a failure because the dataset contains many duplicate review
+    templates.
+    """
+
+    print()
+    print("-" * 90)
+    print("RETRIEVED EVIDENCE")
+    print("-" * 90)
+
+    if top_reviews is None:
+
+        print(
+            "No review dataframe was returned."
+        )
+
+        return
 
     if top_reviews.empty:
 
@@ -143,140 +414,436 @@ def print_retrieved_reviews(
 
         return
 
-    for rank, (_, row) in enumerate(
-        top_reviews.iterrows(),
-        start=1
-    ):
-
-        print()
-
-        print(
-            f"[{rank}] Review ID : "
-            f"{row['review_id']}"
-        )
-
-        print(
-            f"    Rating    : "
-            f"{row['rating']}"
-        )
-
-        print(
-            f"    Score     : "
-            f"{row['score']:.4f}"
-        )
-
-        print(
-            f"    Comment   : "
-            f"{row['comment']}"
-        )
-
-        print(
-            "-" * 80
-        )
-
-
-# ============================================================
-# RUN ONE QUESTION
-# ============================================================
-
-def run_question(
-    item,
-    reviews,
-    embedding_matrix,
-    test_group
-):
-
-    number = item["number"]
-
-    category = item[
-        "category"
-    ]
-
-    question = item[
-        "question"
-    ]
-
-    print()
-    print()
-    print("=" * 80)
-
     print(
-        f"{test_group} "
-        f"QUESTION {number}"
+        f"Retrieved distinct reviews: "
+        f"{len(top_reviews)}"
     )
 
-    print("=" * 80)
+    for rank, (_, row) in enumerate(
+        top_reviews.iterrows(),
+        start=1,
+    ):
+
+        review_id = row.get(
+            "review_id",
+            "unknown",
+        )
+
+        rating = row.get(
+            "rating",
+            "unknown",
+        )
+
+        score = row.get(
+            "score",
+            None,
+        )
+
+        comment = row.get(
+            "comment",
+            "",
+        )
+
+        review_date = row.get(
+            "review_date",
+            "unknown",
+        )
+
+        print()
+        print(
+            f"[{rank}] Review ID : {review_id}"
+        )
+
+        print(
+            f"    Rating    : {rating}"
+        )
+
+        if score is not None:
+
+            try:
+
+                print(
+                    f"    Score     : "
+                    f"{float(score):.4f}"
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                print(
+                    f"    Score     : {score}"
+                )
+
+        print(
+            f"    Date      : {review_date}"
+        )
+
+        print(
+            f"    Comment   : {comment}"
+        )
+
+        # ------------------------------------------------------------
+        # Optional enriched fields.
+        #
+        # These may be NaN because only part of the dataset has been
+        # enriched by the current enrichment pipeline.
+        # ------------------------------------------------------------
+
+        sentiment = row.get(
+            "sentiment_label",
+            None,
+        )
+
+        sentiment_score = row.get(
+            "sentiment_score",
+            None,
+        )
+
+        topic = row.get(
+            "topic",
+            None,
+        )
+
+        key_issue = row.get(
+            "key_issue",
+            None,
+        )
+
+        if (
+            sentiment is not None
+            and not pd.isna(sentiment)
+        ):
+
+            print(
+                f"    Sentiment  : {sentiment}"
+            )
+
+        if (
+            sentiment_score is not None
+            and not pd.isna(sentiment_score)
+        ):
+
+            print(
+                f"    Sent. Score: {sentiment_score}"
+            )
+
+        if (
+            topic is not None
+            and not pd.isna(topic)
+        ):
+
+            print(
+                f"    Topic      : {topic}"
+            )
+
+        if (
+            key_issue is not None
+            and not pd.isna(key_issue)
+        ):
+
+            print(
+                f"    Key Issue  : {key_issue}"
+            )
+
+        print("-" * 90)
+
+
+# ============================================================================
+# CHECK RETRIEVED EVIDENCE
+# ============================================================================
+
+def validate_retrieved_reviews(
+    top_reviews: pd.DataFrame,
+) -> Dict[str, Any]:
+    """
+    Validate the structure of the returned evidence.
+
+    This does NOT judge whether the answer is semantically correct.
+    It only checks whether the RAG engine returned usable evidence.
+    """
+
+    diagnostics = {
+        "valid": True,
+        "review_count": 0,
+        "missing_required_columns": [],
+        "duplicate_review_ids": 0,
+        "empty_comments": 0,
+    }
+
+    if top_reviews is None:
+
+        diagnostics["valid"] = False
+
+        return diagnostics
+
+    if not isinstance(
+        top_reviews,
+        pd.DataFrame,
+    ):
+
+        diagnostics["valid"] = False
+
+        return diagnostics
+
+    diagnostics["review_count"] = len(
+        top_reviews
+    )
+
+    required_columns = {
+        "review_id",
+        "rating",
+        "comment",
+        "score",
+    }
+
+    missing_columns = (
+        required_columns
+        - set(top_reviews.columns)
+    )
+
+    diagnostics[
+        "missing_required_columns"
+    ] = sorted(
+        missing_columns
+    )
+
+    if missing_columns:
+
+        diagnostics["valid"] = False
+
+    if not top_reviews.empty:
+
+        duplicate_ids = (
+            top_reviews["review_id"]
+            .duplicated()
+            .sum()
+        )
+
+        diagnostics[
+            "duplicate_review_ids"
+        ] = int(
+            duplicate_ids
+        )
+
+        if duplicate_ids > 0:
+
+            diagnostics["valid"] = False
+
+        empty_comments = (
+            top_reviews["comment"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+            .sum()
+        )
+
+        diagnostics[
+            "empty_comments"
+        ] = int(
+            empty_comments
+        )
+
+    return diagnostics
+
+
+# ============================================================================
+# RUN ONE QUESTION
+# ============================================================================
+
+def run_question(
+    item: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Execute one complete RAG test.
+
+    Current API:
+
+        rag_engine.answer_review_question(question)
+
+    Returns structured test information.
+    """
+
+    number = item["number"]
+    category = item["category"]
+    question = item["question"]
 
     print()
+    print()
+    print_separator()
 
+    print(
+        f"RAG TEST QUESTION {number}"
+    )
+
+    print_separator()
+
+    print()
     print(
         f"Category : {category}"
     )
 
     print()
-
     print(
         f"Question : {question}"
     )
 
-    # ========================================================
-    # VECTOR SEARCH + RAG
-    # ========================================================
+    print()
+
+    start_time = time.perf_counter()
 
     try:
 
-        print()
-
         print(
-            "Searching embedded reviews..."
+            "Running Qdrant → BigQuery → "
+            "Progressive Retrieval → LLM..."
         )
+
+        # ------------------------------------------------------------
+        # IMPORTANT:
+        #
+        # This is the ONLY public RAG call required.
+        #
+        # No local embeddings are loaded here.
+        # ------------------------------------------------------------
 
         answer, top_reviews = (
             rag_engine.answer_review_question(
-                question,
-                reviews,
-                embedding_matrix,
-                top_k=TOP_K
+                question
             )
         )
 
-        print()
-
-        print(
-            "✅ RAG pipeline completed."
+        elapsed = (
+            time.perf_counter()
+            - start_time
         )
 
-    except Exception as e:
+        print()
+        print(
+            "✓ RAG pipeline completed."
+        )
+
+    except Exception as exc:
+
+        elapsed = (
+            time.perf_counter()
+            - start_time
+        )
 
         print()
-
         print(
-            "❌ RAG pipeline failed."
+            "✗ RAG pipeline failed."
         )
 
         print(
             f"Error: "
-            f"{type(e).__name__}: {e}"
+            f"{type(exc).__name__}: {exc}"
         )
 
-        return False
+        return {
+            "number": number,
+            "category": category,
+            "question": question,
+            "success": False,
+            "answer": "",
+            "review_count": 0,
+            "elapsed_seconds": elapsed,
+            "error": (
+                f"{type(exc).__name__}: {exc}"
+            ),
+        }
 
-    # ========================================================
-    # RETRIEVED REVIEWS
-    # ========================================================
+    # ------------------------------------------------------------------------
+    # Evidence validation
+    # ------------------------------------------------------------------------
+
+    evidence_diagnostics = (
+        validate_retrieved_reviews(
+            top_reviews
+        )
+    )
+
+    print()
+    print(
+        f"Retrieved evidence: "
+        f"{len(top_reviews):,} distinct review(s)"
+    )
+
+    if len(top_reviews) < EXPECTED_TOP_K:
+
+        print(
+            "ℹ Fewer than 5 distinct reviews were "
+            "returned. This is not automatically a "
+            "failure because duplicate review templates "
+            "are removed by the RAG engine."
+        )
+
+    if not evidence_diagnostics["valid"]:
+
+        print(
+            "⚠ Evidence structure validation "
+            "found an issue."
+        )
+
+        if evidence_diagnostics[
+            "missing_required_columns"
+        ]:
+
+            print(
+                "  Missing columns: "
+                + ", ".join(
+                    evidence_diagnostics[
+                        "missing_required_columns"
+                    ]
+                )
+            )
+
+        if (
+            evidence_diagnostics[
+                "duplicate_review_ids"
+            ]
+            > 0
+        ):
+
+            print(
+                "  Duplicate review IDs detected: "
+                f"{evidence_diagnostics['duplicate_review_ids']}"
+            )
+
+        if (
+            evidence_diagnostics[
+                "empty_comments"
+            ]
+            > 0
+        ):
+
+            print(
+                "  Empty comments detected: "
+                f"{evidence_diagnostics['empty_comments']}"
+            )
+
+    # ------------------------------------------------------------------------
+    # Print retrieved evidence
+    # ------------------------------------------------------------------------
 
     print_retrieved_reviews(
         top_reviews
     )
 
-    # ========================================================
-    # ANSWER
-    # ========================================================
+    # ------------------------------------------------------------------------
+    # Print answer
+    # ------------------------------------------------------------------------
 
     print()
-    print("=" * 80)
-    print("RAG ANSWER")
-    print("=" * 80)
+    print_separator()
+
+    print(
+        "RAG ANSWER"
+    )
+
+    print_separator()
 
     print()
 
@@ -285,295 +852,406 @@ def run_question(
     print()
 
     print(
-        f"✅ {test_group} "
-        f"question {number} completed."
+        f"Execution time: "
+        f"{elapsed:.2f} seconds"
     )
 
-    return True
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print("=" * 80)
-    print("ZOMATO RAG ENGINE - COMPLETE TEST")
-    print("=" * 80)
-
-    # ========================================================
-    # 1. CHECK OLLAMA
-    # ========================================================
+    # ------------------------------------------------------------------------
+    # Success
+    # ------------------------------------------------------------------------
 
     print()
 
     print(
-        "[1] Checking Ollama..."
+        f"✓ Question {number} completed."
     )
 
-    ok, models = (
-        rag_engine.check_ollama()
+    return {
+        "number": number,
+        "category": category,
+        "question": question,
+        "success": True,
+        "answer": answer,
+        "review_count": len(
+            top_reviews
+        ),
+        "elapsed_seconds": elapsed,
+        "evidence_valid": (
+            evidence_diagnostics["valid"]
+        ),
+        "error": "",
+    }
+
+
+# ============================================================================
+# PRINT TEST SUMMARY
+# ============================================================================
+
+def print_summary(
+    results: List[Dict[str, Any]],
+) -> None:
+    """
+    Print final RAG test summary.
+    """
+
+    total = len(results)
+
+    successful = sum(
+        1
+        for result in results
+        if result["success"]
     )
 
-    if not ok:
+    failed = total - successful
 
-        print(
-            "❌ Ollama connection failed."
+    evidence_valid = sum(
+        1
+        for result in results
+        if (
+            result["success"]
+            and result.get(
+                "evidence_valid",
+                False,
+            )
         )
-
-        print(models)
-
-        return
-
-    print(
-        "✅ Ollama is running."
     )
 
-    print()
-
-    print(
-        "Available models:"
-    )
-
-    for model in models:
-
-        print(
-            f"  - {model}"
+    zero_evidence = sum(
+        1
+        for result in results
+        if (
+            result["success"]
+            and result["review_count"] == 0
         )
-
-    # ========================================================
-    # 2. LOAD EMBEDDINGS ONCE
-    # ========================================================
-
-    print()
-
-    print(
-        "[2] Initializing RAG engine..."
     )
 
-    print()
-
-    print(
-        "IMPORTANT: embedding parquet files "
-        "will be loaded only once."
-    )
-
-    reviews, embedding_matrix = (
-        rag_engine.initialize_rag_engine()
-    )
-
-    print()
-
-    print(
-        "✅ Embedding store initialized."
-    )
-
-    print(
-        f"Reviews loaded     : "
-        f"{len(reviews):,}"
-    )
-
-    print(
-        f"Embedding matrix   : "
-        f"{embedding_matrix.shape}"
-    )
-
-    # ========================================================
-    # TEST COUNTERS
-    # ========================================================
-
-    total_questions = (
-        len(INDIVIDUAL_QUESTIONS)
-        +
-        len(GROUPED_QUESTIONS)
-    )
-
-    successful = 0
-
-    failed = 0
-
-    # ========================================================
-    # 3. TEST 9 INDIVIDUAL QUESTIONS
-    # ========================================================
-
-    print()
-    print()
-    print("=" * 80)
-    print("PHASE 1 - 9 INDIVIDUAL QUESTIONS")
-    print("=" * 80)
-
-    for item in INDIVIDUAL_QUESTIONS:
-
-        success = run_question(
-            item,
-            reviews,
-            embedding_matrix,
-            "INDIVIDUAL"
+    total_time = sum(
+        result.get(
+            "elapsed_seconds",
+            0.0,
         )
+        for result in results
+    )
 
-        if success:
+    average_time = (
+        total_time / total
+        if total
+        else 0.0
+    )
 
-            successful += 1
+    print()
+    print()
+    print_separator()
+
+    print(
+        "RAG TEST SUMMARY"
+    )
+
+    print_separator()
+
+    print()
+
+    print(
+        f"Total questions        : {total}"
+    )
+
+    print(
+        f"Successful questions   : {successful}"
+    )
+
+    print(
+        f"Failed questions       : {failed}"
+    )
+
+    print(
+        f"Valid evidence results : {evidence_valid}"
+    )
+
+    print(
+        f"Zero-evidence results  : {zero_evidence}"
+    )
+
+    print(
+        f"Total execution time   : "
+        f"{total_time:.2f} seconds"
+    )
+
+    print(
+        f"Average question time  : "
+        f"{average_time:.2f} seconds"
+    )
+
+    # ------------------------------------------------------------------------
+    # Per-question status
+    # ------------------------------------------------------------------------
+
+    print()
+    print("-" * 90)
+    print("QUESTION STATUS")
+    print("-" * 90)
+
+    for result in results:
+
+        number = result["number"]
+        category = result["category"]
+        count = result["review_count"]
+        elapsed = result[
+            "elapsed_seconds"
+        ]
+
+        if result["success"]:
+
+            status = "PASS"
 
         else:
 
-            failed += 1
+            status = "FAIL"
 
-    # ========================================================
-    # 4. TEST 5 GROUPED QUESTIONS
-    # ========================================================
-
-    print()
-    print()
-    print("=" * 80)
-    print("PHASE 2 - 5 GROUPED QUESTIONS")
-    print("=" * 80)
-
-    for item in GROUPED_QUESTIONS:
-
-        success = run_question(
-            item,
-            reviews,
-            embedding_matrix,
-            "GROUPED"
+        print(
+            f"{number:02d}. "
+            f"{status:<5} | "
+            f"{category:<22} | "
+            f"reviews={count:<2} | "
+            f"time={elapsed:.2f}s"
         )
 
-        if success:
+    # ------------------------------------------------------------------------
+    # Failed questions
+    # ------------------------------------------------------------------------
 
-            successful += 1
+    failed_results = [
+        result
+        for result in results
+        if not result["success"]
+    ]
 
-        else:
+    if failed_results:
 
-            failed += 1
+        print()
+        print("-" * 90)
+        print("FAILED QUESTIONS")
+        print("-" * 90)
 
-    # ========================================================
-    # FINAL SUMMARY
-    # ========================================================
+        for result in failed_results:
 
-    print()
-    print()
-    print("=" * 80)
-    print("RAG TEST SUMMARY")
-    print("=" * 80)
+            print()
+            print(
+                f"Question {result['number']}: "
+                f"{result['category']}"
+            )
 
-    print()
+            print(
+                f"Question: "
+                f"{result['question']}"
+            )
 
-    print(
-        f"Total questions     : "
-        f"{total_questions}"
-    )
+            print(
+                f"Error: "
+                f"{result['error']}"
+            )
 
-    print(
-        f"Successful questions: "
-        f"{successful}"
-    )
-
-    print(
-        f"Failed questions    : "
-        f"{failed}"
-    )
-
-    print()
-
-    print(
-        f"Reviews searched    : "
-        f"{len(reviews):,}"
-    )
-
-    print(
-        f"Embedding dimension : "
-        f"{embedding_matrix.shape[1]}"
-    )
+    # ------------------------------------------------------------------------
+    # Final status
+    # ------------------------------------------------------------------------
 
     print()
-
-    # ========================================================
-    # FINAL STATUS
-    # ========================================================
 
     if failed == 0:
 
-        print("=" * 80)
+        print_separator()
+
         print(
-            "🎉 ALL RAG TESTS COMPLETED SUCCESSFULLY"
+            "ALL RAG TEST QUESTIONS COMPLETED"
         )
-        print("=" * 80)
+
+        print_separator()
 
         print()
 
         print(
-            "✅ Ollama connection works"
+            "✓ Qdrant retrieval executed"
         )
 
         print(
-            "✅ Embedding files loaded once"
+            "✓ BigQuery evidence retrieval executed"
         )
 
         print(
-            "✅ In-memory embedding cache works"
+            "✓ Progressive retrieval executed"
         )
 
         print(
-            "✅ All embedded reviews searched"
+            "✓ Duplicate filtering executed"
         )
 
         print(
-            "✅ Question embeddings generated"
+            "✓ Diversity selection executed"
         )
 
         print(
-            "✅ Vector similarity works"
+            "✓ Evidence-aware LLM generation executed"
         )
 
         print(
-            "✅ Duplicate review text filtering works"
-        )
-
-        print(
-            "✅ MMR diversity retrieval works"
-        )
-
-        print(
-            "✅ RAG context generation works"
-        )
-
-        print(
-            "✅ LLM answer generation works"
-        )
-
-        print(
-            "✅ 9 individual questions tested"
-        )
-
-        print(
-            "✅ 5 grouped questions tested"
+            "✓ Multiple question categories tested"
         )
 
     else:
 
-        print("=" * 80)
+        print_separator()
+
         print(
-            "⚠️ RAG TEST COMPLETED WITH FAILURES"
+            "RAG TEST COMPLETED WITH FAILURES"
         )
-        print("=" * 80)
+
+        print_separator()
 
         print()
 
         print(
-            f"Successful: "
-            f"{successful}"
+            f"Successful: {successful}"
         )
 
         print(
-            f"Failed    : "
-            f"{failed}"
+            f"Failed    : {failed}"
         )
 
 
-# ============================================================
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main() -> None:
+    """
+    Run the complete RAG test suite.
+    """
+
+    print_separator()
+
+    print(
+        "ZOMATO AI - COMPLETE QDRANT RAG TEST SUITE"
+    )
+
+    print_separator()
+
+    print()
+
+    print(
+        "Current RAG architecture:"
+    )
+
+    print(
+        "  Question"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  Qdrant Cloud Inference"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  Progressive Retrieval"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  Duplicate / Diversity Filtering"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  BigQuery Evidence Retrieval"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  Ollama Cloud LLM"
+    )
+
+    print(
+        "      ↓"
+    )
+
+    print(
+        "  Final RAG Answer"
+    )
+
+    print()
+
+    print(
+        f"Number of test questions: "
+        f"{len(TEST_QUESTIONS)}"
+    )
+
+    print(
+        f"Expected final evidence target: "
+        f"{EXPECTED_TOP_K}"
+    )
+
+    print()
+
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "Fewer than 5 retrieved reviews is NOT "
+        "automatically considered a failure."
+    )
+
+    print(
+        "The RAG engine intentionally removes "
+        "duplicate review templates."
+    )
+
+    print()
+
+    # ========================================================================
+    # RUN TESTS
+    # ========================================================================
+
+    results: List[
+        Dict[str, Any]
+    ] = []
+
+    for item in TEST_QUESTIONS:
+
+        result = run_question(
+            item
+        )
+
+        results.append(
+            result
+        )
+
+    # ========================================================================
+    # FINAL SUMMARY
+    # ========================================================================
+
+    print_summary(
+        results
+    )
+
+
+# ============================================================================
 # ENTRY POINT
-# ============================================================
+# ============================================================================
 
 if __name__ == "__main__":
 

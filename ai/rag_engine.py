@@ -1,78 +1,98 @@
 """
-ZOMATO AI - PROGRESSIVE + DIVERSE + EVIDENCE-AWARE RAG ENGINE
+ZOMATO AI - QDRANT + ADAPTIVE PROGRESSIVE RAG ENGINE
+=====================================================
 
-Purpose
--------
-Production-ready RAG engine for the Zomato AI project.
+Production RAG engine for the Zomato AI project.
 
 Architecture
 ------------
-                    User Question
+
+                    USER QUESTION
                          |
                          v
-                 Question Embedding
+              QDRANT CLOUD INFERENCE
                          |
                          v
-             +-------------------------+
-             | Progressive Retrieval   |
-             |                         |
-             | Top 100                 |
-             |    |                    |
-             |    v                    |
-             | Top 500                 |
-             |    |                    |
-             |    v                    |
-             | Top 1000                |
-             +-------------------------+
+                   VECTOR SEARCH
                          |
                          v
-              Relevance Filtering
+              PROGRESSIVE RETRIEVAL
+            100 -> 500 -> 1000 -> 2500 -> 5000
                          |
                          v
-             Exact Duplicate Removal
+               ADAPTIVE RELEVANCE
                          |
                          v
-           Near-Duplicate Text Removal
+              QUERY-AWARE EVIDENCE
+                   FILTERING
                          |
                          v
-             Diversity / Pattern Filter
+                DUPLICATE REMOVAL
                          |
                          v
-                  Final Reviews
+              DIVERSITY SELECTION
                          |
                          v
-               Evidence-Aware LLM
+                  TOP REVIEWS
                          |
                          v
-                    RAG Answer
+                    BIGQUERY
+                         |
+                         v
+             REVIEW + METADATA
+                         |
+                         v
+               EVIDENCE-AWARE LLM
+                         |
+                         v
+                    RAG ANSWER
 
 
-Important
+IMPORTANT
 ---------
-This file is designed to be imported by:
+
+This file intentionally preserves the public API used by:
 
     orchestrator.py
-    Streamlit UI
+    Streamlit
     future API layer
 
-The persistent index is built separately using:
+Main function:
 
-    build_rag_index.py
+    answer_review_question(question)
 
-This file NEVER reloads the original 60 parquet files.
-It only loads:
+returns:
 
-    rag_index/embeddings.npy
-    rag_index/reviews.parquet
-    rag_index/metadata.json
+    answer, top_reviews
+
+
+Old architecture is NOT used:
+
+    - rag_index/embeddings.npy
+    - local mxbai embeddings
+    - local NumPy vector search
+    - local review parquet as retrieval source
+    - MMR
+
+Current architecture:
+
+    - Qdrant Cloud
+    - Qdrant Cloud Inference
+    - sentence-transformers/all-MiniLM-L6-v2
+    - 384 dimensions
+    - BigQuery as review source of truth
+    - Adaptive relevance
+    - Query-aware evidence filtering
+    - Progressive Retrieval
+    - Duplicate removal
+    - Diversity selection
+    - Ollama Cloud gpt-oss:120b-cloud
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -80,113 +100,310 @@ import numpy as np
 import pandas as pd
 import ollama
 
+from dotenv import load_dotenv
+from google.cloud import bigquery
+from qdrant_client import QdrantClient, models
+
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
-
-INDEX_DIR = BASE_DIR / "rag_index"
-
-EMBEDDINGS_FILE = INDEX_DIR / "embeddings.npy"
-REVIEWS_FILE = INDEX_DIR / "reviews.parquet"
-METADATA_FILE = INDEX_DIR / "metadata.json"
+PROJECT_DIR = BASE_DIR.parent
 
 
-# Ollama models
-EMBEDDING_MODEL = "mxbai-embed-large:latest"
+# ============================================================
+# QDRANT
+# ============================================================
+
+QDRANT_COLLECTION = "zomato_reviews"
+
+EMBEDDING_MODEL = (
+    "sentence-transformers/all-MiniLM-L6-v2"
+)
+
+EMBEDDING_DIMENSION = 384
+
+
+# ============================================================
+# OLLAMA
+# ============================================================
+
 LLM_MODEL = "gpt-oss:120b-cloud"
 
 
-# ------------------------------------------------------------
-# Progressive retrieval
-# ------------------------------------------------------------
+# ============================================================
+# BIGQUERY
+# ============================================================
 
-CANDIDATE_LEVELS = [100, 500, 1000]
+DEFAULT_PROJECT_ID = (
+    "zomato-ai-data-engineering"
+)
+
+BQ_LOCATION = "asia-south1"
+
+REVIEWS_DATASET = "raw"
+
+REVIEWS_TABLE_NAME = "reviews"
+
+ENRICHED_DATASET = "ai"
+
+ENRICHED_TABLE_NAME = "review_enriched"
+
+
+# ============================================================
+# PROGRESSIVE RETRIEVAL
+# ============================================================
+
+CANDIDATE_LEVELS = [
+    100,
+    500,
+    1000,
+    2500,
+    5000,
+]
 
 FINAL_K = 5
 
 
-# ------------------------------------------------------------
-# Relevance
-# ------------------------------------------------------------
+# ============================================================
+# ADAPTIVE RELEVANCE
+# ============================================================
 
-RELEVANCE_THRESHOLD = 0.50
+"""
+The old engine used:
+
+    score >= 0.50
+
+for every query.
+
+Our diagnostic showed that this is too strict.
+
+Examples from the actual dataset:
+
+Low ratings:
+    best score = 0.4331
+    actual comment = relevant
+
+Value for money:
+    best score = 0.4165
+    actual comment = relevant
+
+Customer problems:
+    best score = 0.4051
+    actual comment = relevant
+
+Negative experience:
+    best score = 0.3598
+    result was NOT genuinely negative
+
+Therefore we use:
+
+    MIN_RELEVANCE_SCORE = 0.36
+
+and an adaptive threshold:
+
+    max(
+        MIN_RELEVANCE_SCORE,
+        top_score - SCORE_WINDOW
+    )
+
+This allows legitimate lower-scoring evidence while
+still rejecting extremely weak matches.
+"""
+
+MIN_RELEVANCE_SCORE = 0.36
+
+SCORE_WINDOW = 0.08
 
 
-# ------------------------------------------------------------
-# Text diversity
-# ------------------------------------------------------------
+# ============================================================
+# TEXT DUPLICATE CONTROL
+# ============================================================
 
 TEXT_DUPLICATE_THRESHOLD = 0.75
 
 
-# ------------------------------------------------------------
-# Semantic diversity
-#
-# A selected review should not be too similar to a previously
-# selected review.
-# ------------------------------------------------------------
+# ============================================================
+# SEMANTIC DIVERSITY
+# ============================================================
 
 SELECTED_SIMILARITY_MAX = 0.70
 
 
-# ------------------------------------------------------------
-# Dominant pattern protection
-#
-# Prevents 5 almost identical reviews from dominating the final
-# evidence.
-# ------------------------------------------------------------
+# ============================================================
+# PATTERN DIVERSITY
+# ============================================================
 
 DOMINANT_PATTERN_RATIO = 0.60
 
 MAX_SAME_PATTERN = 2
 
 
-# ------------------------------------------------------------
-# Answer configuration
-# ------------------------------------------------------------
+# ============================================================
+# LLM
+# ============================================================
 
 MAX_REVIEW_TEXT_LENGTH = 1000
 
 
 # ============================================================
-# GLOBAL CACHE
+# CLIENT CACHE
 # ============================================================
 
-_INDEX_CACHE: Dict[str, Any] | None = None
+_QDRANT_CLIENT: QdrantClient | None = None
+
+_BQ_CLIENT: bigquery.Client | None = None
+
+
+# ============================================================
+# STANDARD RESULT COLUMNS
+# ============================================================
+
+REVIEW_COLUMNS = [
+    "review_id",
+    "rating",
+    "comment",
+    "review_date",
+    "score",
+    "sentiment_label",
+    "sentiment_score",
+    "topic",
+    "key_issue",
+]
 
 
 # ============================================================
 # UTILITY
 # ============================================================
 
-def _print_separator(char: str = "=", width: int = 70) -> None:
+def _print_separator(
+    char: str = "=",
+    width: int = 70,
+) -> None:
+
     print(char * width)
+
+
+def _load_environment() -> None:
+    """
+    Load environment variables.
+
+    Qdrant credentials are expected in:
+
+        airflow/.env
+    """
+
+    airflow_env = (
+        PROJECT_DIR
+        / "airflow"
+        / ".env"
+    )
+
+    if airflow_env.exists():
+
+        load_dotenv(
+            airflow_env,
+            override=False,
+        )
+
+    load_dotenv(
+        override=False
+    )
+
+
+def _get_project_id() -> str:
+    """
+    Get the active Google Cloud project.
+    """
+
+    return os.getenv(
+        "GOOGLE_CLOUD_PROJECT",
+        DEFAULT_PROJECT_ID,
+    )
+
+
+def _get_reviews_table() -> str:
+
+    return (
+        f"{_get_project_id()}."
+        f"{REVIEWS_DATASET}."
+        f"{REVIEWS_TABLE_NAME}"
+    )
+
+
+def _get_enriched_reviews_table() -> str:
+
+    return (
+        f"{_get_project_id()}."
+        f"{ENRICHED_DATASET}."
+        f"{ENRICHED_TABLE_NAME}"
+    )
+
+
+def _safe_text(
+    value: Any,
+) -> str:
+
+    if value is None:
+        return ""
+
+    try:
+
+        if pd.isna(value):
+            return ""
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        pass
+
+    return str(value)
+
+
+# ============================================================
+# EMPTY REVIEW DATAFRAME
+# ============================================================
+
+def _empty_review_dataframe() -> pd.DataFrame:
+    """
+    Always return the same columns even when no evidence exists.
+
+    This fixes the old test_rag.py warning where an empty
+    DataFrame had no columns.
+    """
+
+    return pd.DataFrame(
+        columns=REVIEW_COLUMNS
+    )
 
 
 # ============================================================
 # TEXT NORMALIZATION
 # ============================================================
 
-def normalize_text(text: Any) -> str:
+def normalize_text(
+    text: Any,
+) -> str:
     """
-    Normalize review text for duplicate detection.
-
-    Examples:
-        "The FOOD was absolutely delicious!"
-        "the food was absolutely delicious"
-
-    become approximately the same normalized representation.
+    Normalize text for duplicate detection.
     """
 
     if text is None:
         return ""
 
-    text = str(text).lower().strip()
+    text = str(
+        text
+    ).lower().strip()
 
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     text = re.sub(
         r"[^\w\s]",
@@ -199,21 +416,30 @@ def normalize_text(text: Any) -> str:
 
 
 # ============================================================
-# TOKEN SET SIMILARITY
+# TOKEN SIMILARITY
 # ============================================================
 
-def token_similarity(text_a: str, text_b: str) -> float:
+def token_similarity(
+    text_a: str,
+    text_b: str,
+) -> float:
     """
-    Calculate Jaccard similarity between two review texts.
+    Jaccard token similarity.
 
-    This avoids sklearn dependency.
-
-    Returns:
-        value between 0 and 1
+    Used only for textual duplicate detection.
     """
 
-    a = set(normalize_text(text_a).split())
-    b = set(normalize_text(text_b).split())
+    a = set(
+        normalize_text(
+            text_a
+        ).split()
+    )
+
+    b = set(
+        normalize_text(
+            text_b
+        ).split()
+    )
 
     if not a and not b:
         return 1.0
@@ -221,319 +447,973 @@ def token_similarity(text_a: str, text_b: str) -> float:
     if not a or not b:
         return 0.0
 
-    intersection = len(a.intersection(b))
-    union = len(a.union(b))
+    intersection = len(
+        a.intersection(b)
+    )
+
+    union = len(
+        a.union(b)
+    )
 
     if union == 0:
         return 0.0
 
-    return intersection / union
+    return (
+        intersection / union
+    )
 
 
 # ============================================================
-# LOAD PERSISTENT INDEX
+# QUERY INTENT
 # ============================================================
 
-def _load_index() -> Dict[str, Any]:
+def _question_has_any(
+    question: str,
+    words: List[str],
+) -> bool:
+
+    question = normalize_text(
+        question
+    )
+
+    return any(
+        word in question
+        for word in words
+    )
+
+
+def detect_query_intents(
+    question: str,
+) -> Dict[str, bool]:
     """
-    Load the persistent RAG index.
+    Detect lightweight query intent.
 
-    Uses memory mapping for embeddings so the 1.14 GB matrix
-    does not need to be copied unnecessarily into RAM.
+    This is NOT an LLM classifier.
+
+    It is a deterministic precision layer used after
+    semantic retrieval.
+
+    The purpose is to prevent cases such as:
+
+        "restaurant service"
+
+    returning only:
+
+        "food was delicious"
+
+    or:
+
+        "high ratings"
+
+    returning:
+
+        rating = 3
+
     """
 
-    global _INDEX_CACHE
+    q = normalize_text(
+        question
+    )
 
-    if _INDEX_CACHE is not None:
-        return _INDEX_CACHE
+    intents = {
+        "rating_low": False,
+        "rating_high": False,
 
-    print()
-    _print_separator()
-    print("LOADING PERSISTENT RAG INDEX")
-    _print_separator()
+        "food": False,
+        "delivery": False,
+        "service": False,
+        "price": False,
+        "packaging": False,
 
-    print(f"Index directory : {INDEX_DIR}")
-    print(f"Embeddings file : {EMBEDDINGS_FILE}")
-    print(f"Reviews file    : {REVIEWS_FILE}")
-    print(f"Metadata file   : {METADATA_FILE}")
+        "positive": False,
+        "negative": False,
+        "problem": False,
 
-    if not INDEX_DIR.exists():
-        raise FileNotFoundError(
-            f"RAG index directory does not exist:\n{INDEX_DIR}\n\n"
-            "Run build_rag_index.py first."
+        "general": False,
+    }
+
+    # --------------------------------------------------------
+    # Rating intent
+    # --------------------------------------------------------
+
+    if (
+        "low rating" in q
+        or "low ratings" in q
+        or "poor rating" in q
+        or "poor ratings" in q
+        or "bad rating" in q
+        or "bad ratings" in q
+        or "low rated" in q
+        or "low-rated" in q
+    ):
+
+        intents["rating_low"] = True
+
+    if (
+        "high rating" in q
+        or "high ratings" in q
+        or "high rated" in q
+        or "high-rated" in q
+        or "good rating" in q
+        or "good ratings" in q
+        or "top rated" in q
+        or "top-rated" in q
+        or "5 star" in q
+        or "5-star" in q
+    ):
+
+        intents["rating_high"] = True
+
+    # --------------------------------------------------------
+    # Food
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "food",
+            "taste",
+            "tasty",
+            "flavor",
+            "flavour",
+            "quality",
+            "fresh",
+            "freshness",
+            "meal",
+            "dish",
+            "cuisine",
+        ],
+    ):
+
+        intents["food"] = True
+
+    # --------------------------------------------------------
+    # Delivery
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "delivery",
+            "delivered",
+            "delivery partner",
+            "arrived",
+            "late",
+            "delayed",
+            "delivery time",
+        ],
+    ):
+
+        intents["delivery"] = True
+
+    # --------------------------------------------------------
+    # Service / staff
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "service",
+            "staff",
+            "waiter",
+            "hospitality",
+            "restaurant service",
+            "customer service",
+        ],
+    ):
+
+        intents["service"] = True
+
+    # --------------------------------------------------------
+    # Price / value
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "price",
+            "pricing",
+            "value",
+            "value for money",
+            "cost",
+            "cheap",
+            "expensive",
+            "affordable",
+            "worth",
+            "money",
+        ],
+    ):
+
+        intents["price"] = True
+
+    # --------------------------------------------------------
+    # Packaging
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "packaging",
+            "package",
+            "packed",
+            "box",
+            "container",
+        ],
+    ):
+
+        intents["packaging"] = True
+
+    # --------------------------------------------------------
+    # Positive
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "positive",
+            "good",
+            "best",
+            "like",
+            "liked",
+            "praise",
+            "satisfied",
+            "happy",
+        ],
+    ):
+
+        intents["positive"] = True
+
+    # --------------------------------------------------------
+    # Negative
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "negative",
+            "bad",
+            "worst",
+            "dislike",
+            "disliked",
+            "complaint",
+            "complaints",
+            "complain",
+            "rude",
+            "poor",
+        ],
+    ):
+
+        intents["negative"] = True
+
+    # --------------------------------------------------------
+    # Problems
+    # --------------------------------------------------------
+
+    if _question_has_any(
+        q,
+        [
+            "problem",
+            "problems",
+            "issue",
+            "issues",
+            "complaint",
+            "complaints",
+            "complain",
+            "wrong",
+            "missing",
+            "never arrived",
+        ],
+    ):
+
+        intents["problem"] = True
+
+    # --------------------------------------------------------
+    # General questions
+    # --------------------------------------------------------
+
+    if not any(
+        [
+            intents["rating_low"],
+            intents["rating_high"],
+            intents["food"],
+            intents["delivery"],
+            intents["service"],
+            intents["price"],
+            intents["packaging"],
+            intents["positive"],
+            intents["negative"],
+            intents["problem"],
+        ]
+    ):
+
+        intents["general"] = True
+
+    return intents
+
+
+# ============================================================
+# EVIDENCE KEYWORDS
+# ============================================================
+
+FOOD_TERMS = {
+    "food",
+    "taste",
+    "tasty",
+    "delicious",
+    "flavor",
+    "flavour",
+    "fresh",
+    "freshness",
+    "meal",
+    "dish",
+    "cuisine",
+    "cooked",
+    "cooking",
+    "bland",
+    "stale",
+    "cold",
+    "hot",
+    "spicy",
+    "authentic",
+    "yummy",
+}
+
+DELIVERY_TERMS = {
+    "delivery",
+    "delivered",
+    "arrived",
+    "arrival",
+    "late",
+    "delayed",
+    "delay",
+    "partner",
+    "courier",
+    "quick",
+    "fast",
+    "slow",
+    "time",
+}
+
+SERVICE_TERMS = {
+    "service",
+    "staff",
+    "waiter",
+    "hospitality",
+    "restaurant",
+    "manager",
+    "helpful",
+    "rude",
+    "friendly",
+    "unhelpful",
+}
+
+PRICE_TERMS = {
+    "price",
+    "pricing",
+    "value",
+    "cost",
+    "cheap",
+    "expensive",
+    "affordable",
+    "worth",
+    "money",
+    "pricey",
+}
+
+PACKAGING_TERMS = {
+    "packaging",
+    "package",
+    "packed",
+    "box",
+    "container",
+    "pack",
+    "eco",
+}
+
+POSITIVE_TERMS = {
+    "good",
+    "great",
+    "excellent",
+    "amazing",
+    "delicious",
+    "tasty",
+    "fresh",
+    "helpful",
+    "polite",
+    "friendly",
+    "perfect",
+    "perfectly",
+    "best",
+    "love",
+    "loved",
+    "fast",
+    "quick",
+    "value",
+    "worth",
+    "satisfied",
+}
+
+NEGATIVE_TERMS = {
+    "bad",
+    "terrible",
+    "worst",
+    "poor",
+    "rude",
+    "late",
+    "delayed",
+    "delay",
+    "problem",
+    "problems",
+    "issue",
+    "issues",
+    "complaint",
+    "complaints",
+    "wrong",
+    "missing",
+    "cold",
+    "stale",
+    "bland",
+    "tasteless",
+    "dropped",
+    "never",
+    "unhelpful",
+    "slow",
+}
+
+
+def _comment_matches_terms(
+    comment: str,
+    terms: set[str],
+) -> bool:
+
+    text = normalize_text(
+        comment
+    )
+
+    tokens = set(
+        text.split()
+    )
+
+    return bool(
+        tokens.intersection(
+            terms
+        )
+    )
+
+
+# ============================================================
+# QUERY-AWARE EVIDENCE FILTER
+# ============================================================
+
+def _apply_query_constraints(
+    candidates: pd.DataFrame,
+    question: str,
+) -> pd.DataFrame:
+    """
+    Apply lightweight query-aware precision filtering.
+
+    Important:
+
+    We DO NOT require every query term to appear in the
+    comment.
+
+    For multi-topic questions, a review can match at least
+    one requested aspect.
+
+    Examples:
+
+        "food and service"
+
+    can retrieve a food-related review even if it does not
+    mention service. The LLM is then instructed to state
+    that service evidence is limited or absent.
+
+    This is intentionally conservative.
+    """
+
+    if candidates.empty:
+
+        return candidates.copy()
+
+    working = candidates.copy()
+
+    intents = detect_query_intents(
+        question
+    )
+
+    # --------------------------------------------------------
+    # Explicit rating constraints
+    # --------------------------------------------------------
+
+    if intents["rating_low"]:
+
+        working = working[
+            pd.to_numeric(
+                working["rating"],
+                errors="coerce",
+            )
+            <= 2
+        ]
+
+    elif intents["rating_high"]:
+
+        working = working[
+            pd.to_numeric(
+                working["rating"],
+                errors="coerce",
+            )
+            >= 4
+        ]
+
+    # --------------------------------------------------------
+    # If explicit rating filtering removed everything,
+    # return empty rather than inventing evidence.
+    # --------------------------------------------------------
+
+    if working.empty:
+
+        return working.reset_index(
+            drop=True
         )
 
-    required_files = [
-        EMBEDDINGS_FILE,
-        REVIEWS_FILE,
-        METADATA_FILE,
+    # --------------------------------------------------------
+    # Determine semantic aspect terms.
+    #
+    # We only apply this when the question has a specific
+    # aspect that can be reliably recognized.
+    # --------------------------------------------------------
+
+    aspect_sets = []
+
+    if intents["food"]:
+
+        aspect_sets.append(
+            FOOD_TERMS
+        )
+
+    if intents["delivery"]:
+
+        aspect_sets.append(
+            DELIVERY_TERMS
+        )
+
+    if intents["service"]:
+
+        aspect_sets.append(
+            SERVICE_TERMS
+        )
+
+    if intents["price"]:
+
+        aspect_sets.append(
+            PRICE_TERMS
+        )
+
+    if intents["packaging"]:
+
+        aspect_sets.append(
+            PACKAGING_TERMS
+        )
+
+    # --------------------------------------------------------
+    # Positive / negative intent
+    # --------------------------------------------------------
+
+    sentiment_sets = []
+
+    if (
+        intents["positive"]
+        and not intents["negative"]
+    ):
+
+        sentiment_sets.append(
+            POSITIVE_TERMS
+        )
+
+    if (
+        intents["negative"]
+        or intents["problem"]
+    ):
+
+        sentiment_sets.append(
+            NEGATIVE_TERMS
+        )
+
+    # --------------------------------------------------------
+    # Combine aspect + sentiment terms.
+    #
+    # A candidate is accepted if it matches ANY relevant
+    # aspect/sentiment family.
+    # --------------------------------------------------------
+
+    all_term_sets = (
+        aspect_sets
+        + sentiment_sets
+    )
+
+    if not all_term_sets:
+
+        return working.reset_index(
+            drop=True
+        )
+
+    keep_mask = []
+
+    for _, row in (
+        working.iterrows()
+    ):
+
+        comment = _safe_text(
+            row.get(
+                "comment",
+                "",
+            )
+        )
+
+        matched = any(
+            _comment_matches_terms(
+                comment,
+                terms,
+            )
+            for terms in all_term_sets
+        )
+
+        keep_mask.append(
+            matched
+        )
+
+    filtered = working[
+        keep_mask
+    ].copy()
+
+    filtered.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    return filtered
+
+
+# ============================================================
+# QDRANT CLIENT
+# ============================================================
+
+def _get_qdrant_client() -> QdrantClient:
+    """
+    Create/cache Qdrant Cloud client.
+    """
+
+    global _QDRANT_CLIENT
+
+    if _QDRANT_CLIENT is not None:
+
+        return _QDRANT_CLIENT
+
+    _load_environment()
+
+    qdrant_url = os.getenv(
+        "QDRANT_URL"
+    )
+
+    qdrant_api_key = os.getenv(
+        "QDRANT_API_KEY"
+    )
+
+    if not qdrant_url:
+
+        raise RuntimeError(
+            "QDRANT_URL is not set. "
+            "Expected it in airflow/.env."
+        )
+
+    if not qdrant_api_key:
+
+        raise RuntimeError(
+            "QDRANT_API_KEY is not set. "
+            "Expected it in airflow/.env."
+        )
+
+    _QDRANT_CLIENT = QdrantClient(
+        url=qdrant_url,
+        api_key=qdrant_api_key,
+        cloud_inference=True,
+    )
+
+    return _QDRANT_CLIENT
+
+
+# ============================================================
+# BIGQUERY CLIENT
+# ============================================================
+
+def _get_bigquery_client():
+    """
+    Create/cache BigQuery client.
+
+    Supports:
+
+        Local Windows
+        Airflow Docker
+        Render
+    """
+
+    global _BQ_CLIENT
+
+    if _BQ_CLIENT is not None:
+
+        return _BQ_CLIENT
+
+    _load_environment()
+
+    project_id = (
+        _get_project_id()
+    )
+
+    project_root = (
+        Path(__file__).resolve().parent.parent
+    )
+
+    local_credentials = (
+        project_root
+        / "airflow"
+        / "credentials"
+        / "service-account.json"
+    )
+
+    airflow_credentials = Path(
+        "/opt/airflow/credentials/service-account.json"
+    )
+
+    render_credentials = Path(
+        "/etc/secrets/zomato-service-account.json"
+    )
+
+    credential_candidates = [
+        local_credentials,
+        airflow_credentials,
+        render_credentials,
     ]
 
-    for file_path in required_files:
-        if not file_path.exists():
-            raise FileNotFoundError(
-                f"Required RAG index file is missing:\n{file_path}"
+    credential_file = None
+
+    for candidate in (
+        credential_candidates
+    ):
+
+        if candidate.exists():
+
+            credential_file = candidate
+            break
+
+    if credential_file is not None:
+
+        print()
+        print(
+            "Using BigQuery credentials:"
+        )
+
+        print(
+            f"  {credential_file}"
+        )
+
+        _BQ_CLIENT = (
+            bigquery.Client
+            .from_service_account_json(
+                str(
+                    credential_file
+                ),
+                project=project_id,
             )
-
-    # --------------------------------------------------------
-    # Embeddings
-    # --------------------------------------------------------
-
-    print()
-    print("Loading embeddings.npy with memory mapping...")
-
-    embeddings = np.load(
-        EMBEDDINGS_FILE,
-        mmap_mode="r",
-    )
-
-    # --------------------------------------------------------
-    # Reviews
-    # --------------------------------------------------------
-
-    print("Loading reviews.parquet...")
-
-    reviews = pd.read_parquet(
-        REVIEWS_FILE,
-        engine="pyarrow",
-    )
-
-    # --------------------------------------------------------
-    # Metadata
-    # --------------------------------------------------------
-
-    print("Loading metadata.json...")
-
-    with open(
-        METADATA_FILE,
-        "r",
-        encoding="utf-8",
-    ) as f:
-        metadata = json.load(f)
-
-    # --------------------------------------------------------
-    # Validation
-    # --------------------------------------------------------
-
-    if len(embeddings) != len(reviews):
-        raise ValueError(
-            "RAG index is inconsistent.\n"
-            f"Embeddings: {len(embeddings)}\n"
-            f"Reviews:    {len(reviews)}"
         )
 
-    if embeddings.ndim != 2:
-        raise ValueError(
-            f"Expected 2D embedding matrix, got shape "
-            f"{embeddings.shape}"
+    else:
+
+        print()
+        print(
+            "No explicit BigQuery "
+            "service-account file found."
         )
 
-    if "review_id" not in reviews.columns:
-        raise ValueError(
-            "reviews.parquet does not contain review_id."
+        print(
+            "Using Application Default Credentials."
         )
 
-    if "comment" not in reviews.columns:
-        raise ValueError(
-            "reviews.parquet does not contain comment."
+        _BQ_CLIENT = (
+            bigquery.Client(
+                project=project_id
+            )
         )
 
-    _INDEX_CACHE = {
-        "embeddings": embeddings,
-        "reviews": reviews,
-        "metadata": metadata,
-    }
-
-    print()
-    _print_separator()
-    print("RAG INDEX READY")
-    _print_separator()
-
-    print(f"Reviews indexed    : {len(reviews):,}")
-    print(
-        f"Embedding dimension: {embeddings.shape[1]:,}"
-    )
-    print(
-        f"Embedding dtype    : {embeddings.dtype}"
-    )
-    print(
-        f"Review rows        : {len(reviews):,}"
-    )
-    print("Index cache        : ENABLED")
-    print("Memory mapping     : ENABLED")
-
-    return _INDEX_CACHE
+    return _BQ_CLIENT
 
 
 # ============================================================
-# PUBLIC INDEX INFORMATION
+# QDRANT COLLECTION VALIDATION
 # ============================================================
 
-def get_rag_index_info() -> Dict[str, Any]:
+def _validate_qdrant_collection() -> None:
     """
-    Return index information for Streamlit/UI.
-
-    Example:
-
-        info = get_rag_index_info()
-
+    Verify production Qdrant collection.
     """
 
-    index = _load_index()
+    client = (
+        _get_qdrant_client()
+    )
 
-    embeddings = index["embeddings"]
-    reviews = index["reviews"]
-    metadata = index["metadata"]
+    try:
 
-    return {
-        "index_directory": str(INDEX_DIR),
-        "reviews": int(len(reviews)),
-        "embedding_dimension": int(
-            embeddings.shape[1]
-        ),
-        "embedding_dtype": str(
-            embeddings.dtype
-        ),
-        "embedding_shape": list(
-            embeddings.shape
-        ),
-        "memory_mapped": True,
-        "cached": _INDEX_CACHE is not None,
-        "metadata": metadata,
-    }
+        info = client.get_collection(
+            collection_name=QDRANT_COLLECTION
+        )
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            f"Could not access Qdrant collection "
+            f"'{QDRANT_COLLECTION}'."
+        ) from exc
+
+    vectors = (
+        info.config.params.vectors
+    )
+
+    size = getattr(
+        vectors,
+        "size",
+        None,
+    )
+
+    if size != EMBEDDING_DIMENSION:
+
+        raise RuntimeError(
+            "Unexpected Qdrant vector dimension. "
+            f"Expected {EMBEDDING_DIMENSION}, "
+            f"found {size}."
+        )
 
 
 # ============================================================
-# QUESTION EMBEDDING
+# QUESTION DOCUMENT
 # ============================================================
 
 def generate_question_embedding(
     question: str,
-) -> np.ndarray:
+) -> models.Document:
     """
-    Generate a normalized embedding for the user question.
+    Prepare a question for Qdrant Cloud Inference.
+
+    No local embedding is generated.
     """
 
-    if not question or not question.strip():
+    if (
+        not question
+        or not question.strip()
+    ):
+
         raise ValueError(
             "Question cannot be empty."
         )
 
-    response = ollama.embeddings(
+    return models.Document(
+        text=question.strip(),
         model=EMBEDDING_MODEL,
-        prompt=question.strip(),
     )
-
-    if "embedding" not in response:
-        raise RuntimeError(
-            "Ollama did not return an embedding."
-        )
-
-    vector = np.asarray(
-        response["embedding"],
-        dtype=np.float32,
-    )
-
-    norm = np.linalg.norm(vector)
-
-    if norm == 0:
-        raise ValueError(
-            "Question embedding has zero magnitude."
-        )
-
-    vector = vector / norm
-
-    return vector
 
 
 # ============================================================
-# SEMANTIC SEARCH
+# QDRANT SEARCH
 # ============================================================
 
 def semantic_search(
-    question_embedding: np.ndarray,
+    question_embedding: models.Document,
     candidate_k: int,
 ) -> pd.DataFrame:
     """
-    Search the persistent embedding matrix.
-
-    Because embeddings are normalized, dot product is cosine
-    similarity.
+    Retrieve candidate review IDs and vectors from Qdrant.
     """
 
-    index = _load_index()
-
-    embeddings = index["embeddings"]
-    reviews = index["reviews"]
-
-    candidate_k = min(
-        candidate_k,
-        len(reviews),
+    client = (
+        _get_qdrant_client()
     )
 
-    # --------------------------------------------------------
-    # Calculate cosine similarity.
-    #
-    # Chunking prevents unnecessary giant temporary arrays.
-    # --------------------------------------------------------
-
-    chunk_size = 50_000
-
-    scores = np.empty(
-        len(embeddings),
-        dtype=np.float32,
+    candidate_k = max(
+        1,
+        int(candidate_k),
     )
 
-    for start in range(
-        0,
-        len(embeddings),
-        chunk_size,
-    ):
-        end = min(
-            start + chunk_size,
-            len(embeddings),
+    response = client.query_points(
+        collection_name=QDRANT_COLLECTION,
+
+        query=question_embedding,
+
+        limit=candidate_k,
+
+        with_payload=False,
+
+        with_vectors=True,
+    )
+
+    rows = []
+
+    for point in response.points:
+
+        vector = getattr(
+            point,
+            "vector",
+            None,
         )
 
-        chunk = embeddings[start:end]
+        if isinstance(
+            vector,
+            dict,
+        ):
 
-        scores[start:end] = np.asarray(
-            np.dot(
-                chunk,
-                question_embedding,
-            ),
-            dtype=np.float32,
+            vector = next(
+                iter(
+                    vector.values()
+                )
+            )
+
+        rows.append(
+            {
+                "review_id": str(
+                    point.id
+                ),
+
+                "score": float(
+                    point.score
+                ),
+
+                "_qdrant_vector": (
+                    np.asarray(
+                        vector,
+                        dtype=np.float32,
+                    )
+                    if vector is not None
+                    else None
+                ),
+            }
         )
 
-    # --------------------------------------------------------
-    # Top candidate indices
-    # --------------------------------------------------------
+    if not rows:
 
-    if candidate_k < len(scores):
+        return pd.DataFrame(
+            columns=[
+                "review_id",
+                "score",
+                "_qdrant_vector",
+            ]
+        )
 
-        candidate_indices = np.argpartition(
-            scores,
-            -candidate_k,
-        )[-candidate_k:]
+    result = pd.DataFrame(
+        rows
+    )
 
-        candidate_indices = candidate_indices[
-            np.argsort(
-                scores[candidate_indices]
-            )[::-1]
-        ]
-
-    else:
-
-        candidate_indices = np.argsort(
-            scores
-        )[::-1]
-
-    result = reviews.iloc[
-        candidate_indices
-    ].copy()
-
-    result["score"] = scores[
-        candidate_indices
-    ]
+    result.sort_values(
+        "score",
+        ascending=False,
+        inplace=True,
+    )
 
     result.reset_index(
         drop=True,
@@ -544,23 +1424,254 @@ def semantic_search(
 
 
 # ============================================================
-# RELEVANCE FILTER
+# ADAPTIVE SCORE FILTER
 # ============================================================
 
-def apply_relevance_filter(
+def apply_adaptive_relevance_filter(
     candidates: pd.DataFrame,
-) -> pd.DataFrame:
+) -> Tuple[
+    pd.DataFrame,
+    float,
+]:
     """
-    Remove reviews below semantic relevance threshold.
+    Apply adaptive semantic relevance.
+
+    Old:
+
+        score >= 0.50
+
+    New:
+
+        threshold =
+            max(
+                0.36,
+                best_score - 0.08
+            )
+
+    This means:
+
+    If best score = 0.4331:
+
+        threshold = 0.36
+
+    If best score = 0.5105:
+
+        threshold = 0.4305
+
+    If best score = 0.3598:
+
+        threshold = 0.36
+
+        -> no candidates
+
+    This is intentionally conservative.
     """
 
     if candidates.empty:
-        return candidates.copy()
+
+        return (
+            candidates.copy(),
+            MIN_RELEVANCE_SCORE,
+        )
+
+    top_score = float(
+        candidates[
+            "score"
+        ].max()
+    )
+
+    adaptive_threshold = max(
+        MIN_RELEVANCE_SCORE,
+        top_score - SCORE_WINDOW,
+    )
 
     result = candidates[
         candidates["score"]
-        >= RELEVANCE_THRESHOLD
+        >= adaptive_threshold
     ].copy()
+
+    result.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    return (
+        result,
+        adaptive_threshold,
+    )
+
+
+# ============================================================
+# BIGQUERY REVIEW RETRIEVAL
+# ============================================================
+
+def fetch_reviews_from_bigquery(
+    review_ids: List[str],
+) -> pd.DataFrame:
+    """
+    Fetch review text and optional enrichment from BigQuery.
+    """
+
+    if not review_ids:
+
+        return _empty_review_dataframe()
+
+    ordered_ids = list(
+        dict.fromkeys(
+            str(review_id)
+            for review_id in review_ids
+        )
+    )
+
+    client = (
+        _get_bigquery_client()
+    )
+
+    reviews_table = (
+        _get_reviews_table()
+    )
+
+    enriched_table = (
+        _get_enriched_reviews_table()
+    )
+
+    query = f"""
+        WITH latest_enrichment AS (
+
+            SELECT
+
+                CAST(
+                    review_id
+                    AS STRING
+                ) AS review_id,
+
+                sentiment_label,
+
+                sentiment_score,
+
+                topic,
+
+                key_issue
+
+            FROM `{enriched_table}`
+
+            QUALIFY ROW_NUMBER() OVER (
+
+                PARTITION BY
+                    CAST(
+                        review_id
+                        AS STRING
+                    )
+
+                ORDER BY
+                    processed_at DESC
+
+            ) = 1
+        )
+
+        SELECT
+
+            CAST(
+                r.review_id
+                AS STRING
+            ) AS review_id,
+
+            SAFE_CAST(
+                r.rating
+                AS INT64
+            ) AS rating,
+
+            CAST(
+                r.comment
+                AS STRING
+            ) AS comment,
+
+            r.review_date,
+
+            e.sentiment_label,
+
+            e.sentiment_score,
+
+            e.topic,
+
+            e.key_issue
+
+        FROM `{reviews_table}` AS r
+
+        LEFT JOIN latest_enrichment AS e
+
+            ON e.review_id =
+               CAST(
+                   r.review_id
+                   AS STRING
+               )
+
+        WHERE CAST(
+            r.review_id
+            AS STRING
+        ) IN UNNEST(
+            @review_ids
+        )
+    """
+
+    job_config = (
+        bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter(
+                    "review_ids",
+                    "STRING",
+                    ordered_ids,
+                )
+            ]
+        )
+    )
+
+    rows = (
+        client.query(
+            query,
+            job_config=job_config,
+            location=BQ_LOCATION,
+        )
+        .result()
+    )
+
+    result = (
+        rows.to_dataframe()
+    )
+
+    if result.empty:
+
+        return _empty_review_dataframe()
+
+    order_map = {
+        review_id: position
+        for position, review_id
+        in enumerate(
+            ordered_ids
+        )
+    }
+
+    result[
+        "_retrieval_order"
+    ] = (
+        result[
+            "review_id"
+        ]
+        .astype(str)
+        .map(order_map)
+    )
+
+    result.sort_values(
+        "_retrieval_order",
+        inplace=True,
+    )
+
+    result.drop(
+        columns=[
+            "_retrieval_order"
+        ],
+        inplace=True,
+    )
 
     result.reset_index(
         drop=True,
@@ -571,36 +1682,131 @@ def apply_relevance_filter(
 
 
 # ============================================================
-# EXACT DUPLICATE REMOVAL
+# ATTACH BIGQUERY
+# ============================================================
+
+def attach_bigquery_evidence(
+    candidates: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Map Qdrant review IDs to BigQuery evidence.
+    """
+
+    if candidates.empty:
+
+        return candidates.copy()
+
+    review_ids = (
+        candidates[
+            "review_id"
+        ]
+        .astype(str)
+        .tolist()
+    )
+
+    reviews = (
+        fetch_reviews_from_bigquery(
+            review_ids
+        )
+    )
+
+    if reviews.empty:
+
+        return pd.DataFrame(
+            columns=list(
+                candidates.columns
+            )
+            + [
+                column
+                for column in REVIEW_COLUMNS
+                if column
+                not in candidates.columns
+            ]
+        )
+
+    result = candidates.merge(
+        reviews,
+        on="review_id",
+        how="inner",
+        sort=False,
+    )
+
+    result.sort_values(
+        "score",
+        ascending=False,
+        inplace=True,
+    )
+
+    result.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    return result
+
+
+# ============================================================
+# EXACT DUPLICATES
 # ============================================================
 
 def remove_exact_duplicates(
     candidates: pd.DataFrame,
-) -> Tuple[pd.DataFrame, int]:
+) -> Tuple[
+    pd.DataFrame,
+    int,
+]:
     """
-    Remove reviews whose normalized text is exactly identical.
+    Remove exact duplicate review text.
+
+    Important:
+
+    Multiple review IDs with the exact same text are NOT
+    treated as independent evidence.
     """
 
     if candidates.empty:
-        return candidates.copy(), 0
+
+        return (
+            candidates.copy(),
+            0,
+        )
 
     seen = set()
+
     keep_rows = []
 
     removed = 0
 
-    for idx, row in candidates.iterrows():
+    for idx, row in (
+        candidates.iterrows()
+    ):
 
         normalized = normalize_text(
-            row["comment"]
+            row.get(
+                "comment",
+                "",
+            )
         )
 
-        if normalized in seen:
+        if not normalized:
+
             removed += 1
+
             continue
 
-        seen.add(normalized)
-        keep_rows.append(idx)
+        if normalized in seen:
+
+            removed += 1
+
+            continue
+
+        seen.add(
+            normalized
+        )
+
+        keep_rows.append(
+            idx
+        )
 
     result = candidates.loc[
         keep_rows
@@ -611,59 +1817,84 @@ def remove_exact_duplicates(
         inplace=True,
     )
 
-    return result, removed
+    return (
+        result,
+        removed,
+    )
 
 
 # ============================================================
-# NEAR DUPLICATE REMOVAL
+# NEAR DUPLICATES
 # ============================================================
 
 def remove_near_duplicates(
     candidates: pd.DataFrame,
-) -> Tuple[pd.DataFrame, int]:
+) -> Tuple[
+    pd.DataFrame,
+    int,
+]:
     """
-    Remove reviews whose wording is too similar.
-
-    Important:
-    We only compare against reviews already retained.
-
-    This keeps the highest semantic-score review among
-    near-identical reviews.
+    Remove highly similar review wording.
     """
 
     if candidates.empty:
-        return candidates.copy(), 0
+
+        return (
+            candidates.copy(),
+            0,
+        )
 
     kept_indices = []
 
     removed = 0
 
-    for idx, row in candidates.iterrows():
+    for idx, row in (
+        candidates.iterrows()
+    ):
 
-        current_text = row["comment"]
+        current_text = _safe_text(
+            row.get(
+                "comment",
+                "",
+            )
+        )
 
         is_duplicate = False
 
-        for kept_idx in kept_indices:
+        for kept_idx in (
+            kept_indices
+        ):
 
-            kept_text = candidates.loc[
-                kept_idx,
-                "comment",
-            ]
-
-            similarity = token_similarity(
-                current_text,
-                kept_text,
+            kept_text = _safe_text(
+                candidates.loc[
+                    kept_idx,
+                    "comment",
+                ]
             )
 
-            if similarity >= TEXT_DUPLICATE_THRESHOLD:
+            similarity = (
+                token_similarity(
+                    current_text,
+                    kept_text,
+                )
+            )
+
+            if (
+                similarity
+                >= TEXT_DUPLICATE_THRESHOLD
+            ):
 
                 is_duplicate = True
+
                 removed += 1
+
                 break
 
         if not is_duplicate:
-            kept_indices.append(idx)
+
+            kept_indices.append(
+                idx
+            )
 
     result = candidates.loc[
         kept_indices
@@ -674,141 +1905,105 @@ def remove_near_duplicates(
         inplace=True,
     )
 
-    return result, removed
+    return (
+        result,
+        removed,
+    )
 
 
 # ============================================================
-# REVIEW PATTERN DETECTION
+# REVIEW PATTERN
 # ============================================================
 
 def detect_review_pattern(
     comment: str,
 ) -> str:
     """
-    Create a lightweight semantic pattern label.
+    Lightweight pattern detection.
 
-    This is NOT sentiment analysis.
-
-    It is only used to prevent one repeated review template
-    from occupying the entire final evidence set.
+    Used only for diversity.
     """
 
-    text = normalize_text(comment)
+    text = normalize_text(
+        comment
+    )
 
     patterns = []
 
-    # --------------------------------------------------------
-    # Food
-    # --------------------------------------------------------
-
-    food_positive = [
-        "delicious",
-        "tasty",
-        "amazing food",
-        "great food",
-        "excellent food",
-        "best meal",
-        "fresh",
-        "flavorful",
-        "yummy",
-    ]
-
-    food_negative = [
-        "bad food",
-        "terrible food",
-        "cold food",
-        "stale",
-        "tasteless",
-        "bland",
-        "not tasty",
-        "food was bad",
-    ]
-
-    # --------------------------------------------------------
-    # Delivery
-    # --------------------------------------------------------
-
-    delivery_positive = [
-        "delivery was quick",
-        "delivered quickly",
-        "fast delivery",
-        "delivery partner was polite",
-        "delivery partner was helpful",
-        "delivery was good",
-    ]
-
-    delivery_negative = [
-        "late delivery",
-        "delivery was late",
-        "delayed delivery",
-        "delivery partner was rude",
-        "delivery was bad",
-        "never arrived",
-    ]
-
-    # --------------------------------------------------------
-    # Service
-    # --------------------------------------------------------
-
-    service_positive = [
-        "good service",
-        "great service",
-        "excellent service",
-        "friendly staff",
-        "helpful staff",
-    ]
-
-    service_negative = [
-        "bad service",
-        "poor service",
-        "rude staff",
-        "unhelpful staff",
-    ]
-
-    # --------------------------------------------------------
-    # Match
-    # --------------------------------------------------------
-
-    if any(
-        phrase in text
-        for phrase in food_positive
+    if _comment_matches_terms(
+        text,
+        FOOD_TERMS,
     ):
-        patterns.append("food_positive")
 
-    if any(
-        phrase in text
-        for phrase in food_negative
-    ):
-        patterns.append("food_negative")
+        patterns.append(
+            "food"
+        )
 
-    if any(
-        phrase in text
-        for phrase in delivery_positive
+    if _comment_matches_terms(
+        text,
+        DELIVERY_TERMS,
     ):
-        patterns.append("delivery_positive")
 
-    if any(
-        phrase in text
-        for phrase in delivery_negative
-    ):
-        patterns.append("delivery_negative")
+        patterns.append(
+            "delivery"
+        )
 
-    if any(
-        phrase in text
-        for phrase in service_positive
+    if _comment_matches_terms(
+        text,
+        SERVICE_TERMS,
     ):
-        patterns.append("service_positive")
 
-    if any(
-        phrase in text
-        for phrase in service_negative
+        patterns.append(
+            "service"
+        )
+
+    if _comment_matches_terms(
+        text,
+        PRICE_TERMS,
     ):
-        patterns.append("service_negative")
+
+        patterns.append(
+            "price"
+        )
+
+    if _comment_matches_terms(
+        text,
+        PACKAGING_TERMS,
+    ):
+
+        patterns.append(
+            "packaging"
+        )
+
+    if _comment_matches_terms(
+        text,
+        NEGATIVE_TERMS,
+    ):
+
+        patterns.append(
+            "negative"
+        )
+
+    if _comment_matches_terms(
+        text,
+        POSITIVE_TERMS,
+    ):
+
+        patterns.append(
+            "positive"
+        )
 
     if not patterns:
-        patterns.append("other")
 
-    return "|".join(sorted(patterns))
+        patterns.append(
+            "other"
+        )
+
+    return "|".join(
+        sorted(
+            set(patterns)
+        )
+    )
 
 
 # ============================================================
@@ -818,29 +2013,27 @@ def detect_review_pattern(
 def select_diverse_reviews(
     candidates: pd.DataFrame,
     final_k: int = FINAL_K,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> Tuple[
+    pd.DataFrame,
+    Dict[str, Any],
+]:
     """
-    Select final reviews while balancing:
+    Select final evidence using:
 
-    1. Semantic relevance
-    2. Different wording
-    3. Different semantic content
-    4. Review-pattern distribution
+        1. relevance
+        2. exact-text diversity
+        3. semantic vector diversity
+        4. pattern diversity
 
-    Important design decision:
+    It is acceptable to return fewer than five reviews.
 
-    We DO NOT blindly require five completely different
-    reviews.
-
-    If the actual evidence contains only two distinct review
-    patterns, we return two rather than inserting irrelevant
-    reviews merely to reach five.
+    We never insert irrelevant reviews simply to reach five.
     """
 
     if candidates.empty:
 
         return (
-            candidates.copy(),
+            _empty_review_dataframe(),
             {
                 "selected_count": 0,
                 "dominant_patterns": [],
@@ -848,247 +2041,159 @@ def select_diverse_reviews(
             },
         )
 
-    # --------------------------------------------------------
-    # Pattern assignment
-    # --------------------------------------------------------
-
     working = candidates.copy()
 
-    working["pattern"] = working[
+    working[
+        "pattern"
+    ] = working[
         "comment"
     ].apply(
         detect_review_pattern
     )
 
-    # --------------------------------------------------------
-    # Determine dominant patterns
-    # --------------------------------------------------------
-
     pattern_counts = (
-        working["pattern"]
+        working[
+            "pattern"
+        ]
         .value_counts()
         .to_dict()
     )
 
-    total = len(working)
+    total = len(
+        working
+    )
 
     dominant_patterns = []
 
-    for pattern, count in pattern_counts.items():
+    for pattern, count in (
+        pattern_counts.items()
+    ):
 
         if (
             total > 0
-            and count / total
+            and (
+                count / total
+            )
             >= DOMINANT_PATTERN_RATIO
         ):
+
             dominant_patterns.append(
                 pattern
             )
 
-    # --------------------------------------------------------
-    # Selection
-    # --------------------------------------------------------
+    selected_indices = []
 
-    selected_indices: List[int] = []
+    pattern_selected = {}
 
-    pattern_selected: Dict[str, int] = {}
+    selected_texts = []
 
-    selected_texts: List[str] = []
-
-    selected_embedding_indices = []
-
-    index = _load_index()
-
-    all_embeddings = index["embeddings"]
+    selected_vectors = []
 
     # --------------------------------------------------------
-    # Map review IDs back to embedding rows.
-    #
-    # We use review_id because the reviews dataframe has been
-    # reordered by semantic search.
+    # FIRST PASS
     # --------------------------------------------------------
 
-    review_id_to_index = {
-        str(review_id): idx
-        for idx, review_id in zip(
-            index["reviews"]["review_id"],
-            range(len(index["reviews"])),
-        )
-    }
-
-    # --------------------------------------------------------
-    # First pass:
-    #
-    # Prefer different patterns.
-    # --------------------------------------------------------
-
-    for idx, row in working.iterrows():
-
-        if len(selected_indices) >= final_k:
-            break
-
-        pattern = row["pattern"]
-
-        count_for_pattern = pattern_selected.get(
-            pattern,
-            0,
-        )
-
-        # ----------------------------------------------------
-        # Prevent a dominant pattern from consuming all slots.
-        # ----------------------------------------------------
+    for idx, row in (
+        working.iterrows()
+    ):
 
         if (
-            pattern in dominant_patterns
-            and count_for_pattern >= MAX_SAME_PATTERN
+            len(
+                selected_indices
+            )
+            >= final_k
         ):
+
+            break
+
+        pattern = row[
+            "pattern"
+        ]
+
+        current_pattern_count = (
+            pattern_selected.get(
+                pattern,
+                0,
+            )
+        )
+
+        if (
+            pattern
+            in dominant_patterns
+            and current_pattern_count
+            >= MAX_SAME_PATTERN
+        ):
+
             continue
 
         # ----------------------------------------------------
-        # Text-level diversity
+        # Text diversity
         # ----------------------------------------------------
 
-        text_is_too_similar = False
+        duplicate_text = False
 
-        for previous_text in selected_texts:
+        for previous_text in (
+            selected_texts
+        ):
 
-            similarity = token_similarity(
-                row["comment"],
-                previous_text,
+            similarity = (
+                token_similarity(
+                    row["comment"],
+                    previous_text,
+                )
             )
 
-            if similarity >= TEXT_DUPLICATE_THRESHOLD:
+            if (
+                similarity
+                >= TEXT_DUPLICATE_THRESHOLD
+            ):
 
-                text_is_too_similar = True
+                duplicate_text = True
+
                 break
 
-        if text_is_too_similar:
+        if duplicate_text:
+
             continue
 
         # ----------------------------------------------------
         # Semantic diversity
         # ----------------------------------------------------
 
-        review_id = str(
-            row["review_id"]
+        current_vector = row.get(
+            "_qdrant_vector"
         )
 
-        embedding_idx = review_id_to_index.get(
-            review_id
-        )
+        if current_vector is not None:
 
-        if embedding_idx is None:
-            continue
-
-        current_embedding = np.asarray(
-            all_embeddings[
-                embedding_idx
-            ],
-            dtype=np.float32,
-        )
-
-        semantic_duplicate = False
-
-        for previous_embedding in selected_embedding_indices:
-
-            similarity = float(
-                np.dot(
-                    current_embedding,
-                    previous_embedding,
-                )
-            )
-
-            if (
-                similarity
-                >= SELECTED_SIMILARITY_MAX
-            ):
-                semantic_duplicate = True
-                break
-
-        if semantic_duplicate:
-            continue
-
-        # ----------------------------------------------------
-        # Accept
-        # ----------------------------------------------------
-
-        selected_indices.append(idx)
-
-        selected_texts.append(
-            row["comment"]
-        )
-
-        selected_embedding_indices.append(
-            current_embedding
-        )
-
-        pattern_selected[pattern] = (
-            count_for_pattern + 1
-        )
-
-    # --------------------------------------------------------
-    # Second pass
-    #
-    # If we still don't have enough reviews, relax pattern
-    # restriction but KEEP duplicate protection.
-    #
-    # This prevents the system from returning only one review
-    # when genuinely different reviews exist.
-    # --------------------------------------------------------
-
-    if len(selected_indices) < final_k:
-
-        for idx, row in working.iterrows():
-
-            if len(selected_indices) >= final_k:
-                break
-
-            if idx in selected_indices:
-                continue
-
-            text_is_too_similar = False
-
-            for previous_text in selected_texts:
-
-                similarity = token_similarity(
-                    row["comment"],
-                    previous_text,
-                )
-
-                if similarity >= TEXT_DUPLICATE_THRESHOLD:
-
-                    text_is_too_similar = True
-                    break
-
-            if text_is_too_similar:
-                continue
-
-            review_id = str(
-                row["review_id"]
-            )
-
-            embedding_idx = review_id_to_index.get(
-                review_id
-            )
-
-            if embedding_idx is None:
-                continue
-
-            current_embedding = np.asarray(
-                all_embeddings[
-                    embedding_idx
-                ],
+            current_vector = np.asarray(
+                current_vector,
                 dtype=np.float32,
             )
 
-            semantic_duplicate = False
+            norm = np.linalg.norm(
+                current_vector
+            )
 
-            for previous_embedding in selected_embedding_indices:
+            if norm > 0:
+
+                current_vector = (
+                    current_vector
+                    / norm
+                )
+
+        semantic_duplicate = False
+
+        if current_vector is not None:
+
+            for previous_vector in (
+                selected_vectors
+            ):
 
                 similarity = float(
                     np.dot(
-                        current_embedding,
-                        previous_embedding,
+                        current_vector,
+                        previous_vector,
                     )
                 )
 
@@ -1096,35 +2201,189 @@ def select_diverse_reviews(
                     similarity
                     >= SELECTED_SIMILARITY_MAX
                 ):
+
                     semantic_duplicate = True
+
                     break
 
-            if semantic_duplicate:
-                continue
+        if semantic_duplicate:
 
-            selected_indices.append(idx)
+            continue
 
-            selected_texts.append(
+        # ----------------------------------------------------
+        # Accept
+        # ----------------------------------------------------
+
+        selected_indices.append(
+            idx
+        )
+
+        selected_texts.append(
+            _safe_text(
                 row["comment"]
             )
+        )
 
-            selected_embedding_indices.append(
-                current_embedding
+        if current_vector is not None:
+
+            selected_vectors.append(
+                current_vector
             )
 
-            pattern = row["pattern"]
+        pattern_selected[
+            pattern
+        ] = (
+            current_pattern_count
+            + 1
+        )
 
-            pattern_selected[pattern] = (
+    # --------------------------------------------------------
+    # SECOND PASS
+    #
+    # Relax pattern limit, but keep duplicate protection.
+    # --------------------------------------------------------
+
+    if (
+        len(
+            selected_indices
+        )
+        < final_k
+    ):
+
+        for idx, row in (
+            working.iterrows()
+        ):
+
+            if (
+                len(
+                    selected_indices
+                )
+                >= final_k
+            ):
+
+                break
+
+            if idx in selected_indices:
+
+                continue
+
+            # ------------------------------------------------
+            # Text diversity
+            # ------------------------------------------------
+
+            duplicate_text = False
+
+            for previous_text in (
+                selected_texts
+            ):
+
+                similarity = (
+                    token_similarity(
+                        row["comment"],
+                        previous_text,
+                    )
+                )
+
+                if (
+                    similarity
+                    >= TEXT_DUPLICATE_THRESHOLD
+                ):
+
+                    duplicate_text = True
+
+                    break
+
+            if duplicate_text:
+
+                continue
+
+            # ------------------------------------------------
+            # Vector diversity
+            # ------------------------------------------------
+
+            current_vector = row.get(
+                "_qdrant_vector"
+            )
+
+            if current_vector is not None:
+
+                current_vector = np.asarray(
+                    current_vector,
+                    dtype=np.float32,
+                )
+
+                norm = np.linalg.norm(
+                    current_vector
+                )
+
+                if norm > 0:
+
+                    current_vector = (
+                        current_vector
+                        / norm
+                    )
+
+            semantic_duplicate = False
+
+            if current_vector is not None:
+
+                for previous_vector in (
+                    selected_vectors
+                ):
+
+                    similarity = float(
+                        np.dot(
+                            current_vector,
+                            previous_vector,
+                        )
+                    )
+
+                    if (
+                        similarity
+                        >= SELECTED_SIMILARITY_MAX
+                    ):
+
+                        semantic_duplicate = True
+
+                        break
+
+            if semantic_duplicate:
+
+                continue
+
+            # ------------------------------------------------
+            # Accept
+            # ------------------------------------------------
+
+            selected_indices.append(
+                idx
+            )
+
+            selected_texts.append(
+                _safe_text(
+                    row["comment"]
+                )
+            )
+
+            if current_vector is not None:
+
+                selected_vectors.append(
+                    current_vector
+                )
+
+            pattern = row[
+                "pattern"
+            ]
+
+            pattern_selected[
+                pattern
+            ] = (
                 pattern_selected.get(
                     pattern,
                     0,
                 )
                 + 1
             )
-
-    # --------------------------------------------------------
-    # Final result
-    # --------------------------------------------------------
 
     result = working.loc[
         selected_indices
@@ -1135,13 +2394,26 @@ def select_diverse_reviews(
         inplace=True,
     )
 
+    # --------------------------------------------------------
+    # Remove internal columns from returned result
+    # --------------------------------------------------------
+
     diagnostics = {
-        "selected_count": len(result),
-        "dominant_patterns": dominant_patterns,
-        "distribution": pattern_selected,
+        "selected_count": len(
+            result
+        ),
+        "dominant_patterns": (
+            dominant_patterns
+        ),
+        "distribution": (
+            pattern_selected
+        ),
     }
 
-    return result, diagnostics
+    return (
+        result,
+        diagnostics,
+    )
 
 
 # ============================================================
@@ -1150,116 +2422,224 @@ def select_diverse_reviews(
 
 def progressive_retrieve(
     question: str,
-    question_embedding: np.ndarray,
+    question_embedding: models.Document,
 ) -> Tuple[
     pd.DataFrame,
     Dict[str, Any],
 ]:
     """
-    Progressive retrieval architecture:
+    Progressive retrieval with adaptive relevance.
 
-        Top 100
-           |
-           | not enough diversity
-           v
-        Top 500
-           |
-           | not enough diversity
-           v
-        Top 1000
-           |
-           v
-        Final evidence
+    Stages:
 
-    This prevents unnecessary retrieval of 1000 reviews
-    when 100 already provide sufficient evidence.
+        100
+        500
+        1000
+        2500
+        5000
+
+    The search expands until five sufficiently different
+    reviews are found or the maximum stage is reached.
     """
 
     print()
-    _print_separator()
-    print("PROGRESSIVE DIVERSE RETRIEVAL")
+
     _print_separator()
 
-    final_candidates = pd.DataFrame()
+    print(
+        "ADAPTIVE PROGRESSIVE QDRANT RETRIEVAL"
+    )
+
+    _print_separator()
+
+    intents = detect_query_intents(
+        question
+    )
+
+    print()
+
+    print(
+        "Detected query intent:"
+    )
+
+    print(
+        f"  {intents}"
+    )
+
+    final_reviews = (
+        _empty_review_dataframe()
+    )
 
     final_diagnostics = {}
 
     stopped_early = False
 
-    for stage_index, candidate_level in enumerate(
-        CANDIDATE_LEVELS
+    previous_selected_ids = set()
+
+    for stage_index, candidate_level in (
+        enumerate(
+            CANDIDATE_LEVELS
+        )
     ):
 
         print()
+
         print(
             f"[Stage {stage_index + 1}] "
-            f"Searching top {candidate_level:,} candidates..."
-        )
-
-        candidates = semantic_search(
-            question_embedding,
-            candidate_level,
-        )
-
-        print(
-            f"Semantic candidates: "
-            f"{len(candidates):,}"
+            f"Searching top "
+            f"{candidate_level:,} "
+            f"reviews in Qdrant..."
         )
 
         # ----------------------------------------------------
-        # Relevance
+        # Qdrant
         # ----------------------------------------------------
 
-        candidates = apply_relevance_filter(
-            candidates
-        )
-
-        print(
-            f"After relevance threshold "
-            f"({RELEVANCE_THRESHOLD:.2f}): "
-            f"{len(candidates):,}"
-        )
-
-        # ----------------------------------------------------
-        # Exact duplicates
-        # ----------------------------------------------------
-
-        candidates, exact_removed = (
-            remove_exact_duplicates(
-                candidates
+        qdrant_candidates = (
+            semantic_search(
+                question_embedding,
+                candidate_level,
             )
         )
 
         print(
-            f"Exact duplicates removed: "
-            f"{exact_removed:,}"
+            f"Qdrant candidates: "
+            f"{len(qdrant_candidates):,}"
         )
 
+        if qdrant_candidates.empty:
+
+            final_reviews = (
+                _empty_review_dataframe()
+            )
+
+            continue
+
         # ----------------------------------------------------
-        # Near duplicates
+        # Adaptive relevance
         # ----------------------------------------------------
 
-        candidates, near_removed = (
-            remove_near_duplicates(
-                candidates
+        (
+            qdrant_candidates,
+            adaptive_threshold,
+        ) = (
+            apply_adaptive_relevance_filter(
+                qdrant_candidates
             )
         )
 
         print(
-            f"Near-duplicate reviews removed: "
-            f"{near_removed:,}"
+            f"Adaptive relevance threshold: "
+            f"{adaptive_threshold:.4f}"
         )
 
         print(
-            f"Different review pool: "
-            f"{len(candidates):,}"
+            f"After adaptive relevance: "
+            f"{len(qdrant_candidates):,}"
         )
+
+        if qdrant_candidates.empty:
+
+            candidates = (
+                pd.DataFrame()
+            )
+
+            exact_removed = 0
+            near_removed = 0
+            query_filtered = 0
+
+        else:
+
+            # ------------------------------------------------
+            # BigQuery
+            # ------------------------------------------------
+
+            candidates = (
+                attach_bigquery_evidence(
+                    qdrant_candidates
+                )
+            )
+
+            print(
+                f"BigQuery evidence rows: "
+                f"{len(candidates):,}"
+            )
+
+            before_query_filter = len(
+                candidates
+            )
+
+            # ------------------------------------------------
+            # Query-aware filtering
+            # ------------------------------------------------
+
+            candidates = (
+                _apply_query_constraints(
+                    candidates,
+                    question,
+                )
+            )
+
+            query_filtered = (
+                before_query_filter
+                - len(candidates)
+            )
+
+            print(
+                f"Query-aware evidence filtering "
+                f"removed: "
+                f"{query_filtered:,}"
+            )
+
+            # ------------------------------------------------
+            # Exact duplicates
+            # ------------------------------------------------
+
+            (
+                candidates,
+                exact_removed,
+            ) = (
+                remove_exact_duplicates(
+                    candidates
+                )
+            )
+
+            print(
+                f"Exact duplicates removed: "
+                f"{exact_removed:,}"
+            )
+
+            # ------------------------------------------------
+            # Near duplicates
+            # ------------------------------------------------
+
+            (
+                candidates,
+                near_removed,
+            ) = (
+                remove_near_duplicates(
+                    candidates
+                )
+            )
+
+            print(
+                f"Near-duplicate reviews removed: "
+                f"{near_removed:,}"
+            )
+
+            print(
+                f"Different review pool: "
+                f"{len(candidates):,}"
+            )
 
         # ----------------------------------------------------
         # Diversity
         # ----------------------------------------------------
 
-        selected, diagnostics = (
+        (
+            selected,
+            diversity_diagnostics,
+        ) = (
             select_diverse_reviews(
                 candidates,
                 FINAL_K,
@@ -1271,45 +2651,106 @@ def progressive_retrieve(
             f"{len(selected):,}"
         )
 
-        final_candidates = selected
+        # ----------------------------------------------------
+        # Keep the best available stage result.
+        #
+        # If a later stage accidentally produces less useful
+        # evidence, do not erase a previously valid result.
+        # ----------------------------------------------------
+
+        selected_ids = set()
+
+        if not selected.empty:
+
+            selected_ids = set(
+                selected[
+                    "review_id"
+                ]
+                .astype(str)
+            )
+
+        if (
+            len(selected)
+            > len(final_reviews)
+        ):
+
+            final_reviews = selected
+
+        elif (
+            final_reviews.empty
+            and not selected.empty
+        ):
+
+            final_reviews = selected
+
+        # ----------------------------------------------------
+        # Diagnostics
+        # ----------------------------------------------------
 
         final_diagnostics = {
-            "candidate_level": candidate_level,
-            "semantic_candidates": len(
-                candidates
+            "candidate_level": (
+                candidate_level
             ),
-            "relevant_candidates": len(
-                candidates
+
+            "semantic_candidates": (
+                len(qdrant_candidates)
             ),
+
+            "adaptive_threshold": (
+                adaptive_threshold
+                if not qdrant_candidates.empty
+                else MIN_RELEVANCE_SCORE
+            ),
+
+            "bigquery_evidence_rows": (
+                len(candidates)
+            ),
+
+            "query_filtered": (
+                query_filtered
+            ),
+
             "exact_duplicates_removed": (
                 exact_removed
             ),
+
             "near_duplicates_removed": (
                 near_removed
             ),
-            "selected_count": len(
-                selected
+
+            "selected_count": (
+                len(selected)
             ),
-            "dominant_patterns": diagnostics[
-                "dominant_patterns"
-            ],
-            "distribution": diagnostics[
-                "distribution"
-            ],
+
+            "dominant_patterns": (
+                diversity_diagnostics[
+                    "dominant_patterns"
+                ]
+            ),
+
+            "distribution": (
+                diversity_diagnostics[
+                    "distribution"
+                ]
+            ),
         }
 
         # ----------------------------------------------------
-        # Enough evidence?
+        # Five reviews found
         # ----------------------------------------------------
 
-        if len(selected) >= FINAL_K:
+        if (
+            len(selected)
+            >= FINAL_K
+        ):
 
             stopped_early = True
 
             print()
+
             print(
-                f"✓ Found {FINAL_K} sufficiently "
-                f"different reviews."
+                f"✓ Found {FINAL_K} "
+                f"sufficiently different reviews."
             )
 
             print(
@@ -1323,18 +2764,25 @@ def progressive_retrieve(
         # Expand
         # ----------------------------------------------------
 
-        if stage_index < len(
-            CANDIDATE_LEVELS
-        ) - 1:
+        if (
+            stage_index
+            < len(
+                CANDIDATE_LEVELS
+            ) - 1
+        ):
 
-            next_level = CANDIDATE_LEVELS[
-                stage_index + 1
-            ]
+            next_level = (
+                CANDIDATE_LEVELS[
+                    stage_index + 1
+                ]
+            )
 
             print()
+
             print(
                 f"Only {len(selected)} "
-                f"sufficiently different reviews found."
+                f"sufficiently different "
+                f"reviews found."
             )
 
             print(
@@ -1346,6 +2794,7 @@ def progressive_retrieve(
         else:
 
             print()
+
             print(
                 "→ Maximum candidate pool reached."
             )
@@ -1356,10 +2805,12 @@ def progressive_retrieve(
 
     final_diagnostics[
         "final_reviews"
-    ] = len(final_candidates)
+    ] = len(
+        final_reviews
+    )
 
     return (
-        final_candidates,
+        final_reviews,
         final_diagnostics,
     )
 
@@ -1372,39 +2823,47 @@ def format_evidence(
     reviews: pd.DataFrame,
 ) -> str:
     """
-    Convert retrieved reviews into compact evidence for the LLM.
+    Convert reviews into LLM evidence.
     """
 
     if reviews.empty:
+
         return (
-            "No relevant customer reviews were "
-            "retrieved."
+            "No sufficiently relevant "
+            "customer reviews were retrieved."
         )
 
     evidence_parts = []
 
-    for _, row in reviews.iterrows():
+    for _, row in (
+        reviews.iterrows()
+    ):
 
-        review_id = row.get(
-            "review_id",
-            "unknown",
+        review_id = _safe_text(
+            row.get(
+                "review_id",
+                "unknown",
+            )
         )
 
-        rating = row.get(
-            "rating",
-            "unknown",
+        rating = _safe_text(
+            row.get(
+                "rating",
+                "unknown",
+            )
         )
 
-        comment = str(
+        comment = _safe_text(
             row.get(
                 "comment",
                 "",
             )
-        )
+        ).strip()
 
-        comment = comment.strip()
-
-        if len(comment) > MAX_REVIEW_TEXT_LENGTH:
+        if (
+            len(comment)
+            > MAX_REVIEW_TEXT_LENGTH
+        ):
 
             comment = (
                 comment[
@@ -1413,10 +2872,83 @@ def format_evidence(
                 + "..."
             )
 
+        block = [
+            f"Review ID: {review_id}",
+            f"Rating: {rating}",
+            f"Comment: {comment}",
+        ]
+
+        sentiment = _safe_text(
+            row.get(
+                "sentiment_label",
+                "",
+            )
+        )
+
+        sentiment_score = row.get(
+            "sentiment_score",
+            None,
+        )
+
+        topic = _safe_text(
+            row.get(
+                "topic",
+                "",
+            )
+        )
+
+        key_issue = _safe_text(
+            row.get(
+                "key_issue",
+                "",
+            )
+        )
+
+        if sentiment:
+
+            block.append(
+                f"Sentiment: {sentiment}"
+            )
+
+        if (
+            sentiment_score
+            is not None
+        ):
+
+            try:
+
+                if not pd.isna(
+                    sentiment_score
+                ):
+
+                    block.append(
+                        "Sentiment score: "
+                        f"{sentiment_score}"
+                    )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                pass
+
+        if topic:
+
+            block.append(
+                f"Topic: {topic}"
+            )
+
+        if key_issue:
+
+            block.append(
+                f"Key issue: {key_issue}"
+            )
+
         evidence_parts.append(
-            f"Review ID: {review_id}\n"
-            f"Rating: {rating}\n"
-            f"Comment: {comment}"
+            "\n".join(
+                block
+            )
         )
 
     return "\n\n".join(
@@ -1433,10 +2965,7 @@ def generate_rag_answer(
     reviews: pd.DataFrame,
 ) -> str:
     """
-    Generate an evidence-aware answer.
-
-    The LLM is explicitly instructed NOT to infer the entire
-    customer population from a small retrieved subset.
+    Generate evidence-aware final answer.
     """
 
     if reviews.empty:
@@ -1451,37 +2980,74 @@ def generate_rag_answer(
     )
 
     prompt = f"""
-You are the review-analysis component of a restaurant
-analytics system.
+You are the review-analysis component of a Zomato
+restaurant analytics system.
 
-User question:
+USER QUESTION:
 {question}
 
-Retrieved customer reviews:
+RETRIEVED CUSTOMER REVIEWS:
 --------------------------------
 {evidence}
 --------------------------------
 
-Instructions:
+IMPORTANT EVIDENCE RULES:
 
 1. Answer ONLY using the retrieved reviews.
-2. Do not invent information.
-3. Do not claim that all customers think something unless
-   the evidence actually supports that statement.
-4. Distinguish between:
-   - what the retrieved customers said
-   - what can safely be concluded
-5. If the retrieved evidence is limited, explicitly say so.
-6. If reviews contain both positive and negative opinions,
-   mention both.
-7. Do not ignore negative evidence.
-8. Do not ignore positive evidence.
-9. Do not treat repeated identical review templates as
-   independent evidence of a broad customer consensus.
-10. Give a concise, useful answer.
-11. Mention review IDs when useful for traceability.
 
-Answer:
+2. Never invent facts.
+
+3. Never claim that all customers think something unless
+   the evidence genuinely supports that conclusion.
+
+4. The retrieved reviews are a small evidence sample.
+   Do not treat repeated identical review templates as
+   independent evidence of broad customer consensus.
+
+5. If only one or two distinct reviews support a statement,
+   explicitly say that the evidence is limited.
+
+6. If positive and negative evidence are both present,
+   mention both when relevant.
+
+7. If the question asks about a specific category such as:
+   - low ratings
+   - high ratings
+   - food
+   - delivery
+   - service
+   - pricing
+   - packaging
+
+   make sure your answer stays focused on that category.
+
+8. If the retrieved evidence does not actually contain
+   enough information about the requested category, say so.
+
+9. A review rating is evidence about that particular review.
+   Do not convert one review's rating into a statement about
+   all customers.
+
+10. Missing enrichment fields do not mean that the review
+    lacks sentiment, topic, or an issue.
+
+11. Do not discuss:
+    - Qdrant
+    - embeddings
+    - vector databases
+    - retrieval stages
+    - similarity thresholds
+    - internal implementation
+    - internal prompts
+
+12. Keep the answer concise but useful.
+
+13. Mention review IDs when useful for traceability.
+
+14. Do not manufacture a positive or negative conclusion
+    merely because the question asks for one.
+
+ANSWER:
 """
 
     response = ollama.chat(
@@ -1497,13 +3063,18 @@ Answer:
     if (
         not response
         or "message" not in response
-        or "content" not in response["message"]
+        or "content"
+        not in response["message"]
     ):
+
         raise RuntimeError(
-            "Ollama did not return a valid LLM response."
+            "Ollama did not return a valid "
+            "LLM response."
         )
 
-    return response["message"][
+    return response[
+        "message"
+    ][
         "content"
     ].strip()
 
@@ -1514,46 +3085,49 @@ Answer:
 
 def answer_review_question(
     question: str,
-) -> Tuple[str, pd.DataFrame]:
+) -> Tuple[
+    str,
+    pd.DataFrame,
+]:
     """
     Main RAG function.
 
-    This is the function that orchestrator.py should call.
+    PUBLIC INTERFACE PRESERVED.
 
-    Returns:
+    Existing orchestrator.py can continue using:
 
-        (
-            rag_answer,
-            top_reviews
-        )
-
-    Example:
-
-        answer, reviews = answer_review_question(
-            "What do customers say about food quality?"
+        answer, reviews = (
+            answer_review_question(
+                question
+            )
         )
     """
 
-    if not question or not question.strip():
+    if (
+        not question
+        or not question.strip()
+    ):
 
         return (
             "Please provide a question.",
-            pd.DataFrame(),
+            _empty_review_dataframe(),
         )
 
     # --------------------------------------------------------
-    # Ensure index is loaded.
+    # Validate Qdrant
     # --------------------------------------------------------
 
-    _load_index()
+    _validate_qdrant_collection()
 
     # --------------------------------------------------------
-    # Question embedding
+    # Question
     # --------------------------------------------------------
 
     print()
+
     print(
-        "Generating question embedding..."
+        "Preparing question for "
+        "Qdrant Cloud Inference..."
     )
 
     question_embedding = (
@@ -1577,9 +3151,11 @@ def answer_review_question(
     # Final answer
     # --------------------------------------------------------
 
-    answer = generate_rag_answer(
-        question,
-        reviews,
+    answer = (
+        generate_rag_answer(
+            question,
+            reviews,
+        )
     )
 
     return (
@@ -1589,7 +3165,7 @@ def answer_review_question(
 
 
 # ============================================================
-# STREAMLIT-FRIENDLY HIGH LEVEL API
+# STREAMLIT API
 # ============================================================
 
 def query_rag(
@@ -1597,33 +3173,28 @@ def query_rag(
 ) -> Dict[str, Any]:
     """
     Streamlit-friendly wrapper.
-
-    Instead of returning only:
-
-        answer, reviews
-
-    this returns a complete structured dictionary.
-
-    Example:
-
-        result = query_rag(question)
-
-        st.write(result["answer"])
-        st.dataframe(result["reviews"])
     """
 
-    if not question or not question.strip():
+    if (
+        not question
+        or not question.strip()
+    ):
 
         return {
             "success": False,
-            "answer": "Please enter a question.",
-            "reviews": pd.DataFrame(),
+            "answer": (
+                "Please enter a question."
+            ),
+            "reviews": (
+                _empty_review_dataframe()
+            ),
+            "review_count": 0,
             "diagnostics": {},
         }
 
     try:
 
-        _load_index()
+        _validate_qdrant_collection()
 
         question_embedding = (
             generate_question_embedding(
@@ -1638,31 +3209,32 @@ def query_rag(
             )
         )
 
-        answer = generate_rag_answer(
-            question,
-            reviews,
+        answer = (
+            generate_rag_answer(
+                question,
+                reviews,
+            )
         )
-
-        # ----------------------------------------------------
-        # Convert dataframe to a UI-friendly representation
-        # while retaining the dataframe itself.
-        # ----------------------------------------------------
 
         display_columns = [
             column
-            for column in [
-                "review_id",
-                "rating",
-                "comment",
-                "review_date",
-                "score",
-            ]
+            for column in REVIEW_COLUMNS
             if column in reviews.columns
         ]
 
-        display_reviews = reviews[
-            display_columns
-        ].copy()
+        if reviews.empty:
+
+            display_reviews = (
+                _empty_review_dataframe()
+            )
+
+        else:
+
+            display_reviews = (
+                reviews[
+                    display_columns
+                ].copy()
+            )
 
         return {
             "success": True,
@@ -1681,10 +3253,12 @@ def query_rag(
             "success": False,
             "question": question,
             "answer": (
-                "The review analysis could not "
-                "be completed."
+                "The review analysis could "
+                "not be completed."
             ),
-            "reviews": pd.DataFrame(),
+            "reviews": (
+                _empty_review_dataframe()
+            ),
             "review_count": 0,
             "diagnostics": {},
             "error": str(exc),
@@ -1692,21 +3266,130 @@ def query_rag(
 
 
 # ============================================================
-# INDEX PRELOAD
+# RAG SYSTEM INFORMATION
+# ============================================================
+
+def get_rag_index_info() -> Dict[str, Any]:
+    """
+    Return information about the Qdrant-based RAG system.
+
+    Function name preserved for compatibility.
+    """
+
+    _load_environment()
+
+    _validate_qdrant_collection()
+
+    client = (
+        _get_qdrant_client()
+    )
+
+    info = client.get_collection(
+        collection_name=QDRANT_COLLECTION
+    )
+
+    vectors = (
+        info.config.params.vectors
+    )
+
+    return {
+        "vector_store": (
+            "Qdrant Cloud"
+        ),
+
+        "collection": (
+            QDRANT_COLLECTION
+        ),
+
+        "embedding_model": (
+            EMBEDDING_MODEL
+        ),
+
+        "embedding_dimension": (
+            EMBEDDING_DIMENSION
+        ),
+
+        "distance": (
+            "COSINE"
+        ),
+
+        "points_count": (
+            int(
+                info.points_count
+            )
+            if info.points_count
+            is not None
+            else None
+        ),
+
+        "indexed_vectors_count": (
+            int(
+                info.indexed_vectors_count
+            )
+            if info.indexed_vectors_count
+            is not None
+            else None
+        ),
+
+        "payload": (
+            "none"
+        ),
+
+        "memory_mapped": (
+            False
+        ),
+
+        "cached": (
+            _QDRANT_CLIENT
+            is not None
+        ),
+
+        "qdrant_vector_config_size": (
+            int(
+                vectors.size
+            )
+        ),
+
+        "bigquery_reviews_table": (
+            _get_reviews_table()
+        ),
+
+        "bigquery_enrichment_table": (
+            _get_enriched_reviews_table()
+        ),
+
+        "candidate_levels": (
+            CANDIDATE_LEVELS
+        ),
+
+        "final_k": (
+            FINAL_K
+        ),
+
+        "minimum_relevance_score": (
+            MIN_RELEVANCE_SCORE
+        ),
+
+        "score_window": (
+            SCORE_WINDOW
+        ),
+    }
+
+
+# ============================================================
+# PRELOAD COMPATIBILITY
 # ============================================================
 
 def preload_rag_index() -> Dict[str, Any]:
     """
-    Explicitly preload the persistent index.
+    Compatibility wrapper.
 
-    Useful for Streamlit startup.
-
-    Example:
-
-        preload_rag_index()
+    There is no local embedding matrix to preload.
     """
 
-    return get_rag_index_info()
+    return (
+        get_rag_index_info()
+    )
 
 
 # ============================================================
@@ -1715,111 +3398,191 @@ def preload_rag_index() -> Dict[str, Any]:
 
 def run_test() -> None:
     """
-    Local test for the RAG engine.
+    Run a complete local RAG test.
 
-    This section runs ONLY when:
+    Command:
 
         python rag_engine.py
-
-    It does NOT run when imported by Streamlit/orchestrator.
     """
 
     _print_separator()
 
     print(
         "ZOMATO AI - "
-        "PROGRESSIVE + DIVERSE + "
-        "EVIDENCE-AWARE RAG ENGINE TEST"
+        "ADAPTIVE QDRANT + PROGRESSIVE + "
+        "DIVERSE + EVIDENCE-AWARE "
+        "RAG ENGINE TEST"
     )
 
     _print_separator()
 
     print()
-    print("Persistent index:")
-    print(f"  {INDEX_DIR}")
+
+    print(
+        "Vector store:"
+    )
+
+    print(
+        f"  {QDRANT_COLLECTION}"
+    )
 
     print()
-    print("Embedding model:")
-    print(f"  {EMBEDDING_MODEL}")
+
+    print(
+        "Embedding model:"
+    )
+
+    print(
+        f"  {EMBEDDING_MODEL}"
+    )
 
     print()
-    print("LLM model:")
-    print(f"  {LLM_MODEL}")
+
+    print(
+        "Embedding dimension:"
+    )
+
+    print(
+        f"  {EMBEDDING_DIMENSION}"
+    )
 
     print()
-    print("Retrieval configuration:")
+
+    print(
+        "LLM model:"
+    )
+
+    print(
+        f"  {LLM_MODEL}"
+    )
+
+    print()
+
+    print(
+        "BigQuery reviews:"
+    )
+
+    print(
+        f"  {_get_reviews_table()}"
+    )
+
+    print()
+
+    print(
+        "BigQuery enrichment:"
+    )
+
+    print(
+        f"  {_get_enriched_reviews_table()}"
+    )
+
+    print()
+
+    print(
+        "Retrieval configuration:"
+    )
+
     print(
         f"  Candidate levels          : "
         f"{CANDIDATE_LEVELS}"
     )
+
     print(
         f"  Final K                   : "
         f"{FINAL_K}"
     )
+
     print(
-        f"  Relevance threshold       : "
-        f"{RELEVANCE_THRESHOLD}"
+        f"  Minimum relevance score   : "
+        f"{MIN_RELEVANCE_SCORE}"
     )
+
+    print(
+        f"  Score window              : "
+        f"{SCORE_WINDOW}"
+    )
+
     print(
         f"  Text duplicate threshold  : "
         f"{TEXT_DUPLICATE_THRESHOLD}"
     )
+
     print(
         f"  Selected similarity max   : "
         f"{SELECTED_SIMILARITY_MAX}"
     )
+
     print(
         f"  Dominant pattern ratio    : "
         f"{DOMINANT_PATTERN_RATIO}"
     )
+
     print(
         f"  Max same pattern          : "
         f"{MAX_SAME_PATTERN}"
     )
 
-    print()
-    print("Loading index...")
+    # --------------------------------------------------------
+    # Qdrant validation
+    # --------------------------------------------------------
 
-    info = get_rag_index_info()
+    print()
+
+    print(
+        "Validating Qdrant collection..."
+    )
+
+    info = (
+        get_rag_index_info()
+    )
 
     print()
-    _print_separator()
-    print("INDEX INFORMATION")
+
     _print_separator()
 
     print(
-        f"Reviews             : "
-        f"{info['reviews']:,}"
+        "QDRANT RAG INFORMATION"
+    )
+
+    _print_separator()
+
+    print(
+        f"Collection          : "
+        f"{info['collection']}"
     )
 
     print(
-        f"Embedding dimension : "
+        f"Points count        : "
+        f"{info['points_count']}"
+    )
+
+    print(
+        f"Vector dimension    : "
         f"{info['embedding_dimension']}"
     )
 
     print(
-        f"Embedding dtype     : "
-        f"{info['embedding_dtype']}"
+        f"Distance            : "
+        f"{info['distance']}"
     )
 
     print(
-        f"Embedding shape     : "
-        f"{info['embedding_shape']}"
+        f"Payload             : "
+        f"{info['payload']}"
     )
 
-    print(
-        f"Index cached        : "
-        f"{info['cached']}"
-    )
-
-    print(
-        f"Memory mapped       : "
-        f"{info['memory_mapped']}"
-    )
+    # --------------------------------------------------------
+    # Test question
+    # --------------------------------------------------------
 
     print()
+
     _print_separator()
-    print("TEST QUESTION")
+
+    print(
+        "TEST QUESTION"
+    )
+
     _print_separator()
 
     question = (
@@ -1827,7 +3590,14 @@ def run_test() -> None:
     )
 
     print()
-    print(f"Question: {question}")
+
+    print(
+        f"Question: {question}"
+    )
+
+    # --------------------------------------------------------
+    # Run RAG
+    # --------------------------------------------------------
 
     answer, reviews = (
         answer_review_question(
@@ -1835,16 +3605,36 @@ def run_test() -> None:
         )
     )
 
-    print()
-    _print_separator()
-    print("RAG ANSWER")
-    _print_separator()
-
-    print(answer)
+    # --------------------------------------------------------
+    # Answer
+    # --------------------------------------------------------
 
     print()
+
     _print_separator()
-    print("FINAL RETRIEVED REVIEWS")
+
+    print(
+        "RAG ANSWER"
+    )
+
+    _print_separator()
+
+    print(
+        answer
+    )
+
+    # --------------------------------------------------------
+    # Evidence
+    # --------------------------------------------------------
+
+    print()
+
+    _print_separator()
+
+    print(
+        "FINAL RETRIEVED REVIEWS"
+    )
+
     _print_separator()
 
     if reviews.empty:
@@ -1857,13 +3647,7 @@ def run_test() -> None:
 
         display_columns = [
             column
-            for column in [
-                "review_id",
-                "rating",
-                "comment",
-                "review_date",
-                "score",
-            ]
+            for column in REVIEW_COLUMNS
             if column in reviews.columns
         ]
 
@@ -1876,8 +3660,13 @@ def run_test() -> None:
         )
 
     print()
+
     _print_separator()
-    print("RAG ENGINE TEST COMPLETED")
+
+    print(
+        "RAG ENGINE TEST COMPLETED"
+    )
+
     _print_separator()
 
 
@@ -1886,4 +3675,39 @@ def run_test() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-    run_test()
+
+    try:
+
+        run_test()
+
+    except KeyboardInterrupt:
+
+        print()
+
+        print(
+            "RAG engine test interrupted."
+        )
+
+    except Exception as exc:
+
+        print()
+
+        print(
+            "=" * 70
+        )
+
+        print(
+            "RAG ENGINE TEST FAILED"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        print()
+
+        print(
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        raise

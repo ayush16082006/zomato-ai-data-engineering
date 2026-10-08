@@ -266,3 +266,14 @@ ai/text_to_sql_backup.py
 
 
 zomato/.user.yml
+
+
+# Generated RAG indexes and embedding batches
+ai/rag_index/
+ai/review_embeddings/
+
+# Resumable ingestion progress (local runtime state)
+ai/qdrant_ingestion_progress.json
+
+# Python environment backups
+environment_backup_*.yml

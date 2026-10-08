@@ -9,3 +9,4 @@ requests
 scikit-learn
 ollama
 python-dotenv
+qdrant-client
