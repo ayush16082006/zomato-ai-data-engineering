@@ -886,7 +886,7 @@ with st.sidebar:
         if st.button(
             question,
             key=f"example_{question}",
-            use_container_width=True,
+            width="stretch",
             disabled=generating,
         ):
 
@@ -896,7 +896,7 @@ with st.sidebar:
 
     if st.button(
         "🗑️ Clear conversation",
-        use_container_width=True,
+        width="stretch",
         disabled=generating,
     ):
 
@@ -1059,7 +1059,7 @@ for message in st.session_state.messages:
 
                         st.dataframe(
                             sql_data,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
@@ -1105,7 +1105,7 @@ for message in st.session_state.messages:
 
                         st.dataframe(
                             rag_reviews,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
@@ -1158,7 +1158,7 @@ for message in st.session_state.messages:
 
                         st.dataframe(
                             sql_data,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
@@ -1190,7 +1190,7 @@ for message in st.session_state.messages:
 
                         st.dataframe(
                             rag_reviews,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 

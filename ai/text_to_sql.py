@@ -1031,7 +1031,7 @@ with st.sidebar:
 
         if st.button(
             q,
-            use_container_width=True
+            width="stretch"
         ):
 
             st.session_state[
@@ -1229,7 +1229,7 @@ if question:
         st.dataframe(
             df,
             hide_index=True,
-            use_container_width=True
+            width="stretch"
         )
 
 
