@@ -772,7 +772,7 @@ def generation_controller():
     if st.button(
         "⏹️ Stop generation",
         key="stop_generation_button",
-        use_container_width=True,
+        width="stretch",
     ):
 
         stop_generation()
