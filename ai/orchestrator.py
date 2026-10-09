@@ -61,6 +61,8 @@ from rag_engine import answer_review_question
 # Domain Guard
 from domain_guard import check_domain
 import os
+from openai import OpenAI
+import logging
 
 
 # ============================================================
@@ -69,7 +71,11 @@ import os
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_BASE_URL",
-    "http://localhost:11434",
+    "http://localhost:11434/v1",
+)
+OLLAMA_API_KEY = os.getenv(
+    "OLLAMA_API_KEY",
+    "ollama",
 )
 
 # Model used for:
@@ -81,7 +87,6 @@ OLLAMA_URL = os.getenv(
 # SQL engine, router, and domain guard keep using their
 # own configured logic.
 ORCHESTRATOR_MODEL = "gpt-oss:120b-cloud"
-
 OLLAMA_TIMEOUT = 120
 
 
@@ -562,25 +567,23 @@ def serialize_sql_result(
 # OLLAMA CHAT HELPER
 # ============================================================
 
+ollama_client = OpenAI(
+    base_url=OLLAMA_URL,
+    api_key=OLLAMA_API_KEY,
+    timeout=OLLAMA_TIMEOUT,
+)
+
+
 def call_ollama(
     system_prompt: str,
     user_prompt: str,
-    temperature: float = 0.0,
+    temperature: float = 0.1,
 ) -> str:
-    """
-    Generic Ollama chat helper.
+    """Generate a response through Ollama's OpenAI-compatible API."""
 
-    Used by:
-
-    - Hybrid SQL planner
-    - Hybrid RAG planner
-    - Final answer generator
-    """
-
-    payload = {
-        "model": ORCHESTRATOR_MODEL,
-
-        "messages": [
+    response = ollama_client.chat.completions.create(
+        model=ORCHESTRATOR_MODEL,
+        messages=[
             {
                 "role": "system",
                 "content": system_prompt,
@@ -590,63 +593,17 @@ def call_ollama(
                 "content": user_prompt,
             },
         ],
-
-        "stream": False,
-
-        "options": {
-            "temperature": temperature,
-        },
-    }
-
-    response = requests.post(
-        f"{OLLAMA_URL}/api/chat",
-        json=payload,
-        timeout=OLLAMA_TIMEOUT,
+        temperature=temperature,
     )
 
-    response.raise_for_status()
+    content = response.choices[0].message.content
 
-    data = response.json()
-
-    message = data.get(
-        "message"
-    )
-
-    if not isinstance(
-        message,
-        dict,
-    ):
-
-        raise ValueError(
-            "Ollama response does not contain "
-            "a valid message."
-        )
-
-    content = message.get(
-        "content"
-    )
-
-    if not isinstance(
-        content,
-        str,
-    ):
-
-        raise ValueError(
-            "Ollama response does not contain "
-            "valid content."
-        )
-
-    content = normalize_text(
-        content
-    )
-
-    if not content:
-
-        raise ValueError(
+    if not content or not content.strip():
+        raise RuntimeError(
             "Ollama returned an empty response."
         )
 
-    return content
+    return content.strip()
 
 
 # ============================================================
@@ -1280,6 +1237,11 @@ def answer_question(
         # CENTRALIZED ORCHESTRATION ERROR HANDLING
         # ====================================================
 
+        logging.exception(
+            "Orchestrator failed on route %s for question: %s",
+            route,
+            question,
+        )
         return {
             "success": False,
 
