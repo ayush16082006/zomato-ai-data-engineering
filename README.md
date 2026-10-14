@@ -185,34 +185,69 @@ Target table:
 zomato-ai-data-engineering.ai.review_enriched
 
 
-**Important limitation:** LLM enrichment is not complete for the entire review population because of limited external model/OmniRoute quota. The project must not claim that all ~300,000 reviews have been LLM-enriched.
+Review enrichment is partially complete. Approximately 13,000 reviews have been enriched in the current project scope; the entire review population has not been enriched because of external model/API quota limitations.
+
+Further enrichment is deferred. Do not assume that all approximately 300,000 reviews have sentiment labels, sentiment scores, topics, or key issues.
 
 ## 7. Review Embeddings
 
-Implemented in:
+### Purpose
 
-ai/embed_all_reviews.py
+Review embeddings enable semantic search over customer reviews. Instead of matching only exact keywords, the system represents review text as numerical vectors so that semantically related reviews can be retrieved.
 
-Model:
+### Embedding Model
 
-mxbai-embed-large:latest
+The project uses the Hugging Face Sentence Transformers model:
 
-Persistent RAG index:
-ai/rag_index/
-├── embeddings.npy
-├── reviews.parquet
-└── metadata.json
+`sentence-transformers/all-MiniLM-L6-v2`
 
-Verified persistent index:
+The model generates **384-dimensional embeddings** for semantic similarity search.
 
-~300,000 reviews
-1024-dimensional embeddings
-float32 vectors
+### Vector Database
 
-The repository also contains batched embedding files under:
+The deployed AI application uses **Qdrant Cloud** as its vector database.
 
-ai/review_embeddings/
+Qdrant stores review vectors and associated payload data, enabling semantic retrieval of relevant customer reviews. The application uses Qdrant Cloud's inference capabilities for embedding and vector-search operations.
 
+**Current vector-search configuration:**
+
+- **Embedding model:** `sentence-transformers/all-MiniLM-L6-v2`
+- **Embedding dimension:** 384
+- **Vector database:** Qdrant Cloud
+- **Collection:** `zomato_reviews`
+- **Search method:** Semantic vector search
+- **Primary use case:** Retrieving relevant customer reviews for AI-powered review analysis
+
+### Review Embedding Pipeline
+
+The embedding workflow is designed to make customer reviews searchable by meaning rather than relying exclusively on keyword matching.
+
+1. Obtain the customer review text.
+2. Generate or request its embedding using the configured Hugging Face model.
+3. Store the vector and corresponding review payload in Qdrant Cloud.
+4. Embed or process the user's search query using the compatible embedding configuration.
+5. Search Qdrant for semantically similar reviews.
+6. Pass retrieved evidence to the RAG answer-generation component.
+
+The embedding model used for query processing must remain compatible with the model used to generate the stored review vectors.
+
+### Batch Processing and Progress Tracking
+
+The repository contains scripts for review embedding and Qdrant ingestion, including:
+
+- `ai/embed_reviews_qdrant.py`
+
+The repository also contains ingestion progress metadata, including `ai/qdrant_ingestion_progress.json`.
+
+These files support the embedding and ingestion workflow. The actual progress and number of indexed reviews should be determined from the existing progress metadata or Qdrant collection rather than inferred from the number of files.
+
+### Current Status and Limitations
+
+- Qdrant Cloud is the vector database used by the deployed application.
+- The local index files under `ai/rag_index/` are not the deployed application's active vector store.
+- The repository retains local RAG index artifacts from earlier development work.
+- Embedding coverage and retrieval quality should be validated against the current Qdrant collection.
+- Review enrichment and review embedding are separate processes: a review can be embedded and searchable even if it does not have all enrichment fields.
 
 ## 8. RAG
 
@@ -375,9 +410,9 @@ enrich_reviews
        v
 dbt_build_ai
 
-Airflow runtime, DAG discovery, task registration, dependencies, Airflow → dbt execution, dbt → BigQuery connectivity, and failure propagation were verified for the prototype.
+The Airflow runtime, DAG discovery, task registration, task dependencies, Airflow → dbt execution, dbt → BigQuery connectivity, and failure propagation were verified for the prototype.
 
-The DAG was intentionally paused after verification.
+The DAG was manually paused after verification to prevent scheduled runs from repeatedly encountering the known BigQuery storage limitation. The orchestration wiring is verified, but a successful full end-to-end run of all three tasks has not been established.
 
 ## 14. Known Limitation
 
@@ -470,39 +505,62 @@ The repository also contains generated logs, dbt `target` files, Python cache fi
 
 ## 17. Current Status
 
-### Completed / verified
+This section summarizes the implementation status of the Zomato AI Data Engineering project based on the current repository, previous tests, and deployment observations.
 
-- BigQuery data architecture
-- dbt staging and mart project structure
-- Text-to-SQL
-- SQL safety validation
-- domain guarding
-- semantic routing
-- RAG retrieval
-- persistent review embedding index
-- hybrid SQL + RAG workflow
-- Streamlit AI interface
-- Airflow prototype wiring
-- Airflow → dbt → BigQuery integration
+### Completed / Implemented
 
-### Partial / limited
+- **Data engineering foundation:** BigQuery is used as the analytical warehouse, with Raw, Staging, and Marts layers.
+- **dbt transformation project:** Staging models and analytical marts have been implemented.
+- **AI review enrichment:** Review enrichment has been implemented, with approximately 13,000 reviews enriched in the current project scope.
+- **Vector-search integration:** Qdrant Cloud is used by the deployed AI application for review retrieval, using the Hugging Face model `sentence-transformers/all-MiniLM-L6-v2` with 384-dimensional embeddings.
+- **AI application:** The Streamlit application and AI orchestration components have been deployed.
+- **Text-to-SQL:** Natural-language analytical questions can be converted into SQL and executed against the configured BigQuery data.
+- **RAG integration:** Retrieved customer reviews can be used as evidence for review-analysis responses.
+- **Hybrid analytics:** The application includes routing and orchestration components for analytical SQL and review-based questions.
+- **Airflow orchestration:** The `zomato_batch` DAG and its task dependencies have been implemented and tested.
+- **Security configuration:** Repository credentials and secrets have been checked to ensure they are not committed to GitHub.
 
-- LLM review enrichment is only partially complete because of external model quota.
-- `fct_orders` is blocked by BigQuery free-storage quota.
-- Airflow is paused after verification because of the known storage limitation.
+### Partial / Limited
+
+- **Review enrichment:** Approximately 13,000 reviews have been enriched. Additional enrichment is deferred because of external model/API quota limitations.
+- **BigQuery storage:** The project's free storage quota has been exceeded. The `fct_orders` model failed during an Airflow-triggered dbt build because of this limitation.
+- **Airflow end-to-end execution:** Task dependencies and failure propagation have been verified. A successful full end-to-end execution of all three tasks has not been established.
+- **Airflow scheduling:** The `zomato_batch` DAG is manually paused to prevent additional scheduled executions while the storage limitation remains unresolved.
+- **Vector retrieval:** The deployed application uses Qdrant Cloud, but the number of successfully indexed reviews and retrieval-quality metrics should be reported only after checking the current collection and available diagnostics.
+- **AI answer quality:** Further evaluation of retrieval relevance, answer grounding, and confidence is a potential improvement.
+
+### Known Limitations
+
+- BigQuery storage constraints prevent a complete successful run of the affected dbt model until the storage issue is resolved.
+- Further review enrichment is deferred; the entire review population should not be assumed to have enrichment labels.
+- A successful individual AI query or a passing structural test does not prove that every component has passed a full end-to-end test.
+- The repository contains local RAG index artifacts from earlier development. These should not be confused with the Qdrant Cloud vector store used by the deployed application.
+
+### Deferred Work
+
+- Reassess BigQuery storage capacity before attempting another full dbt or Airflow run.
+- Resume review enrichment only when additional API quota or an approved alternative processing method is available.
+- Validate Qdrant collection coverage and retrieval quality.
+- Improve data-quality testing, monitoring, and operational diagnostics.
+- Evaluate answer grounding, confidence, and retrieval performance.
+- Improve CI/CD and incremental transformation strategies where appropriate.
+
+### Overall Assessment
+
+The project has implemented its core data engineering, AI application, semantic retrieval, and orchestration components. The deployed application supports analytical and review-based queries. However, the BigQuery storage limitation prevents us from claiming a successful full Airflow pipeline execution, and additional enrichment remains deferred.
 
 ## 18. Future Scope
 
-- Complete remaining review enrichment.
+- Resume review enrichment only if additional API quota or an alternative approved processing method becomes available.
 - Add stronger retrieval and answer-quality evaluation.
-- Add confidence/faithfulness evaluation.
-- Improve hybrid planning.
+- Add confidence and faithfulness evaluation.
+- Improve hybrid SQL + RAG planning.
 - Add retrieval caching.
-- Optimize large fact tables with incremental dbt models.
+- Optimize large fact tables with incremental dbt models where appropriate.
 - Add more data-quality tests.
 - Improve secret management and CI/CD.
 - Add monitoring and alerting.
-- Move the prototype to an appropriate production-scale BigQuery configuration.
+- Revisit BigQuery storage capacity before attempting another full dbt/Airflow run.
 
 ## 19. Demo Flow
 
@@ -561,3 +619,10 @@ Streamlit
 
 
 The prototype has verified AI, RAG, Text-to-SQL, Streamlit, and Airflow workflows. Its two major documented limitations are **partial LLM review enrichment due to model quota constraints** and the **BigQuery free-storage limitation affecting `fct_orders`**.
+
+
+
+## Documentation
+
+- [Setup Guide](setup.md) — Prerequisites, environment configuration, and instructions for running the project.
+- [Architecture Guide](architecture.md) — System architecture, data flow, AI components, and Airflow orchestration.
